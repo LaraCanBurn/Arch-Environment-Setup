@@ -1,0 +1,43 @@
+# 1. Configuración Inicial (01-config.sh)
+Configurar teclado y red.
+Verificar UEFI.
+Configurar mirrorlist con Reflector.
+
+# 2. Creación de Particiones (02-particiones.sh)
+Crear particiones en /dev/sda y /dev/sdb con cfdisk o parted.
+
+# 3. Configuración de LUKS y LVM (03-luks-lvm.sh)
+Cifrado de particiones con LUKS.
+Creación de volúmenes LVM.
+Añadir claves adicionales con luksAddKey.
+Respaldo del encabezado LUKS.
+
+# 4. Configuración de RAID ZFS (04-raid-zfs.sh)
+Cifrado de discos /dev/sdb y /dev/sdc con LUKS.
+Crear el pool RAID-Z con ZFS.
+Configurar opciones como atime=off, compresión y cifrado.
+
+# 5. Montaje de Particiones (05-montaje.sh)
+Montar root, swap, EFI y ZFS.
+
+# 6. Instalación de Arch (06-instalacion.sh)
+Instalar paquetes base con pacstrap.
+Generar fstab.
+
+# 7. Configuración del Sistema (07-configuracion.sh)
+Configurar zona horaria, idioma, hostname.
+Configurar mkinitcpio para LUKS y LVM.
+Configurar grub con UUIDs correctos.
+
+# 8. Post-Instalación (08-post-instalacion.sh)
+Crear usuarios y permisos.
+Configurar pacman.conf con ILoveCandy, ParallelDownloads.
+Instalar servicios esenciales (NetworkManager, ufw, fail2ban).
+
+# 9. Instalación de Entorno Gráfico (09-gui.sh)
+Instalar XFCE, LightDM y sus configuraciones.
+
+# 10. Configuración Final y Seguridad (10-seguridad.sh)
+Implementar limpieza de caché en apagado.
+Verificar claves de LUKS.
+Desmontar y cerrar particiones.
