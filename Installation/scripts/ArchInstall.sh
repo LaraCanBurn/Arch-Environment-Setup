@@ -13,6 +13,13 @@
 # - Manejo de errores mejorado
 # ==================================================
 
+#!/bin/bash
+
+# ==================================================
+# INSTALADOR DE ARCH LINUX CON LUKS/ZFS
+# VERSIÓN FINAL - ERRORES DE RUTAS CORREGIDOS
+# ==================================================
+
 # --- Configuración inicial ---
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -172,16 +179,20 @@ mount_filesystems() {
         return 1
     }
     
-    # Montar EFI (verificar que el directorio existe)
-    if [ -d "${INSTALL_ROOT}/boot/efi" ]; then
-        mount "/dev/${DISK_SYSTEM}1" "${INSTALL_ROOT}/boot/efi" || {
-            print_msg "red" "[ERROR] Falló el montaje de EFI"
+    # Crear directorio EFI si no existe (corrección para el error reportado)
+    if [ ! -d "${INSTALL_ROOT}/boot/efi" ]; then
+        print_msg "yellow" "[ADVERTENCIA] Directorio /boot/efi no existe, creándolo..."
+        mkdir -p "${INSTALL_ROOT}/boot/efi" || {
+            print_msg "red" "[ERROR] No se pudo crear ${INSTALL_ROOT}/boot/efi"
             return 1
         }
-    else
-        print_msg "red" "[ERROR] Directorio ${INSTALL_ROOT}/boot/efi no existe"
-        return 1
     fi
+    
+    # Montar EFI
+    mount "/dev/${DISK_SYSTEM}1" "${INSTALL_ROOT}/boot/efi" || {
+        print_msg "red" "[ERROR] Falló el montaje de EFI"
+        return 1
+    }
     
     # Activar swap
     swapon "/dev/mapper/vg_arch-swap" || {
@@ -335,7 +346,7 @@ main() {
     clear
     print_msg "green" "================================================"
     print_msg "green" "  INSTALADOR DE ARCH LINUX CON LUKS + ZFS"
-    print_msg "green" "  VERSIÓN FINAL - TODOS LOS ERRORES CORREGIDOS"
+    print_msg "green" "  VERSIÓN FINAL - ERRORES DE RUTAS CORREGIDOS"
     print_msg "green" "================================================"
     
     init_logs
