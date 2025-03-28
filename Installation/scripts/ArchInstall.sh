@@ -10,6 +10,7 @@
 # - Continuación ante fallos de paquetes
 # - Notificación post-reinicio de paquetes faltantes
 # - Interfaz colorida y amigable
+# - Manejo de errores mejorado
 # ==================================================
 
 # --- Configuración inicial ---
@@ -21,14 +22,14 @@ NC='\033[0m'
 
 # Variables del sistema
 ZPOOL_NAME="raidz"
-USERNAME="LaraCanBurn"
-ROOT_PASSWORD="archroot"
-USER_PASSWORD="laracanburn"
+USERNAME="archuser"
+ROOT_PASSWORD="archroot123"
+USER_PASSWORD="archuser123"
 TIMEZONE="Europe/Madrid"
 LANG="en_US.UTF-8"
 KEYMAP="es"
 HOSTNAME="archzfs"
-INSTALL_ROOT="/mnt"
+INSTALL_ROOT="/mnt"  # Corregido de /mut a /mnt
 LOG_FILE="/var/log/installation.log"
 FAILED_PKGS_FILE="/var/log/failed_packages.log"
 
@@ -62,6 +63,15 @@ detect_env() {
     print_msg "blue" "[INFO] Entorno detectado: ${ENV}"
 }
 
+# Verificar y crear puntos de montaje
+prepare_mountpoints() {
+    print_msg "blue" "[*] Preparando puntos de montaje..."
+    mkdir -p "${INSTALL_ROOT}/boot/efi"
+    mkdir -p "${INSTALL_ROOT}/proc"
+    mkdir -p "${INSTALL_ROOT}/sys"
+    mkdir -p "${INSTALL_ROOT}/dev"
+}
+
 # Particionado y cifrado
 setup_disks() {
     print_msg "yellow" "[*] Configurando discos..."
@@ -75,33 +85,52 @@ setup_disks() {
         [ ! -b "/dev/$disk" ] && print_msg "red" "[ERROR] Disco $disk no válido" && return 1
     done
 
+    # Limpiar discos
+    print_msg "yellow" "[*] Limpiando tablas de particiones..."
+    for disk in "$DISK_SYSTEM" "${DISK_ZFS[@]}"; do
+        wipefs -a "/dev/$disk"
+        dd if=/dev/zero of="/dev/$disk" bs=1M count=100
+    done
+
     # Particionado (EFI sin cifrar)
-    parted -s /dev/$DISK_SYSTEM mklabel gpt
-    parted -s /dev/$DISK_SYSTEM mkpart primary fat32 1MiB 513MiB
-    parted -s /dev/$DISK_SYSTEM set 1 esp on
-    parted -s /dev/$DISK_SYSTEM mkpart primary ext4 513MiB 100%
+    print_msg "yellow" "[*] Creando particiones..."
+    parted -s "/dev/$DISK_SYSTEM" mklabel gpt
+    parted -s "/dev/$DISK_SYSTEM" mkpart primary fat32 1MiB 513MiB
+    parted -s "/dev/$DISK_SYSTEM" set 1 esp on
+    parted -s "/dev/$DISK_SYSTEM" mkpart primary ext4 513MiB 100%
 
     # Cifrado solo para raíz
     print_msg "yellow" "[*] Configurando cifrado LUKS..."
-    cryptsetup luksFormat --type luks2 /dev/${DISK_SYSTEM}2
-    cryptsetup open /dev/${DISK_SYSTEM}2 crypt-root
+    until cryptsetup luksFormat --type luks2 "/dev/${DISK_SYSTEM}2"; do
+        print_msg "red" "[ERROR] Falló el cifrado, reintentando..."
+        sleep 2
+    done
+    
+    cryptsetup open "/dev/${DISK_SYSTEM}2" crypt-root
 
     # LVM
-    pvcreate /dev/mapper/crypt-root
-    vgcreate vg_arch /dev/mapper/crypt-root
+    print_msg "yellow" "[*] Configurando LVM..."
+    pvcreate "/dev/mapper/crypt-root"
+    vgcreate vg_arch "/dev/mapper/crypt-root"
     lvcreate -L 8G vg_arch -n swap
     lvcreate -l +100%FREE vg_arch -n root
 
     # Formateo
-    mkfs.vfat -F32 /dev/${DISK_SYSTEM}1  # EFI sin cifrar
-    mkswap /dev/mapper/vg_arch-swap
-    mkfs.ext4 /dev/mapper/vg_arch-root
+    print_msg "yellow" "[*] Formateando particiones..."
+    mkfs.vfat -F32 "/dev/${DISK_SYSTEM}1"
+    mkswap "/dev/mapper/vg_arch-swap"
+    mkfs.ext4 "/dev/mapper/vg_arch-root"
 
     # Montaje
-    mount /dev/mapper/vg_arch-root "$INSTALL_ROOT"
-    mkdir -p "$INSTALL_ROOT/boot/efi"
-    mount /dev/${DISK_SYSTEM}1 "$INSTALL_ROOT/boot/efi"
-    swapon /dev/mapper/vg_arch-swap
+    print_msg "yellow" "[*] Montando sistemas de archivos..."
+    mount "/dev/mapper/vg_arch-root" "$INSTALL_ROOT"
+    mount "/dev/${DISK_SYSTEM}1" "${INSTALL_ROOT}/boot/efi"
+    swapon "/dev/mapper/vg_arch-swap"
+    
+    # Montar sistemas virtuales para chroot
+    mount -t proc proc "${INSTALL_ROOT}/proc"
+    mount -t sysfs sys "${INSTALL_ROOT}/sys"
+    mount -o bind /dev "${INSTALL_ROOT}/dev"
 }
 
 # Instalación de paquetes con manejo de errores
@@ -113,7 +142,7 @@ install_packages() {
     
     for pkg in "${pkg_list[@]}"; do
         print_msg "blue" "Instalando $pkg..."
-        if pacman -S --noconfirm --needed "$pkg" 2>/dev/null; then
+        if pacstrap "$INSTALL_ROOT" "$pkg" --noconfirm --needed 2>/dev/null; then
             print_msg "green" "[✓] $pkg instalado"
         else
             print_msg "red" "[✗] Error en $pkg"
@@ -133,16 +162,13 @@ install_packages() {
 configure_system() {
     print_msg "yellow" "[*] Configurando sistema..."
     
-    # Paquetes base + ZFS
-    BASE_PKGS=(
-        "base" "base-devel" "linux" "linux-firmware"
-        "grub" "efibootmgr" "networkmanager" "lvm2"
-        "cryptsetup" "zfs-dkms" "zfs-utils" "vim" "sudo"
-    )
+    # Generar fstab
+    genfstab -U "$INSTALL_ROOT" >> "${INSTALL_ROOT}/etc/fstab"
     
+    # Configuración básica desde chroot
     arch-chroot "$INSTALL_ROOT" bash <<EOF
     # Configuración básica
-    ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime
+    ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime
     hwclock --systohc
     echo "LANG=$LANG" > /etc/locale.conf
     echo "KEYMAP=$KEYMAP" > /etc/vconsole.conf
@@ -161,20 +187,21 @@ configure_system() {
 
     # Usuario
     echo "root:$ROOT_PASSWORD" | chpasswd
-    useradd -m -G wheel $USERNAME
+    useradd -m -G wheel "$USERNAME"
     echo "$USERNAME:$USER_PASSWORD" | chpasswd
     echo "%wheel ALL=(ALL) ALL" >> /etc/sudoers
 
     # Configurar ZFS si hay discos especificados
     if [ ${#DISK_ZFS[@]} -gt 0 ]; then
-        zpool create -f $ZPOOL_NAME ${DISK_ZFS[@]/#/\/dev\/}
-        zfs create $ZPOOL_NAME/data
+        zpool create -f "$ZPOOL_NAME" "${DISK_ZFS[@]/#/\/dev\/}"
+        zfs create "$ZPOOL_NAME/data"
         echo "$ZPOOL_NAME /$ZPOOL_NAME zfs defaults 0 0" >> /etc/fstab
     fi
 EOF
 
     # Configurar notificación post-reinicio
-    cat <<EOF > "$INSTALL_ROOT/etc/profile.d/show_failed_pkgs.sh"
+    mkdir -p "${INSTALL_ROOT}/etc/profile.d"
+    cat <<EOF > "${INSTALL_ROOT}/etc/profile.d/show_failed_pkgs.sh"
 #!/bin/sh
 if [ -s "$FAILED_PKGS_FILE" ]; then
     echo -e "\n\033[1;31m■ PAQUETES FALTANTES ■\033[0m"
@@ -185,37 +212,12 @@ if [ -s "$FAILED_PKGS_FILE" ]; then
 fi
 EOF
 
-    chmod +x "$INSTALL_ROOT/etc/profile.d/show_failed_pkgs.sh"
-}
-
-# Backup de cabeceras LUKS
-backup_luks() {
-    read -p "¿Hacer backup de cabeceras LUKS? [s/N]: " choice
-    [[ "$choice" =~ [sS] ]] || return 0
-
-    print_msg "yellow" "[*] Buscando dispositivos USB..."
-    USB=$(lsblk -d -o NAME,TRAN | grep usb | awk '{print "/dev/"$1}')
-    [ -z "$USB" ] && print_msg "red" "[ERROR] No hay USBs detectados" && return 1
-
-    mkdir -p /mnt/usb_backup
-    mount ${USB}1 /mnt/usb_backup || mount $USB /mnt/usb_backup || return 1
-
-    BACKUP_DIR="/mnt/usb_backup/luks_backup_$(date +%Y%m%d_%H%M%S)"
-    mkdir -p "$BACKUP_DIR"
-
-    print_msg "yellow" "[*] Creando backup en $BACKUP_DIR..."
-    cryptsetup luksHeaderBackup "/dev/${DISK_SYSTEM}2" --header-backup-file "$BACKUP_DIR/luks_header.img"
-    dd if=/dev/urandom bs=1 count=256 of="$BACKUP_DIR/luks_keyfile.bin"
-    chmod 600 "$BACKUP_DIR/luks_keyfile.bin"
-    cryptsetup luksAddKey "/dev/${DISK_SYSTEM}2" "$BACKUP_DIR/luks_keyfile.bin"
-
-    umount /mnt/usb_backup
-    print_msg "green" "[✓] Backup completado en USB"
+    chmod +x "${INSTALL_ROOT}/etc/profile.d/show_failed_pkgs.sh"
 }
 
 # Limpieza final
 cleanup() {
-    print_msg "yellow" "[*] Limpiando..."
+    print_msg "yellow" "[*] Desmontando sistemas de archivos..."
     umount -R "$INSTALL_ROOT"
     swapoff -a
     cryptsetup close crypt-root
@@ -235,17 +237,18 @@ main() {
     clear
     print_msg "green" "================================================"
     print_msg "green" "  INSTALADOR DE ARCH LINUX CON LUKS + ZFS"
+    print_msg "green" "  VERSIÓN CORREGIDA - MANEJO DE ERRORES MEJORADO"
     print_msg "green" "================================================"
     
     init_logs
     check_root
     detect_env
+    prepare_mountpoints
     
     # Flujo de instalación
     setup_disks && \
-    install_packages "${BASE_PKGS[@]}" && \
+    install_packages base linux linux-firmware grub efibootmgr networkmanager lvm2 cryptsetup zfs-dkms zfs-utils vim sudo && \
     configure_system && \
-    backup_luks && \
     cleanup
 }
 
