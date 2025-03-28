@@ -29,7 +29,7 @@ TIMEZONE="Europe/Madrid"
 LANG="en_US.UTF-8"
 KEYMAP="es"
 HOSTNAME="archzfs"
-INSTALL_ROOT="/mnt"  # Corregido de /mut a /mnt
+INSTALL_ROOT="/mnt"
 LOG_FILE="/var/log/installation.log"
 FAILED_PKGS_FILE="/var/log/failed_packages.log"
 
@@ -63,13 +63,26 @@ detect_env() {
     print_msg "blue" "[INFO] Entorno detectado: ${ENV}"
 }
 
-# Verificar y crear puntos de montaje
-prepare_mountpoints() {
-    print_msg "blue" "[*] Preparando puntos de montaje..."
-    mkdir -p "${INSTALL_ROOT}/boot/efi"
-    mkdir -p "${INSTALL_ROOT}/proc"
-    mkdir -p "${INSTALL_ROOT}/sys"
-    mkdir -p "${INSTALL_ROOT}/dev"
+# Crear estructura de directorios completa
+create_mount_structure() {
+    print_msg "blue" "[*] Creando estructura de directorios..."
+    
+    # Directorios principales
+    mkdir -p "$INSTALL_ROOT" || {
+        print_msg "red" "[ERROR] No se pudo crear $INSTALL_ROOT"
+        return 1
+    }
+    
+    # Directorios específicos para montaje
+    local mount_dirs=("boot/efi" "proc" "sys" "dev" "run")
+    for dir in "${mount_dirs[@]}"; do
+        mkdir -p "${INSTALL_ROOT}/${dir}" || {
+            print_msg "red" "[ERROR] No se pudo crear ${INSTALL_ROOT}/${dir}"
+            return 1
+        }
+    done
+    
+    return 0
 }
 
 # Particionado y cifrado
@@ -123,14 +136,29 @@ setup_disks() {
 
     # Montaje
     print_msg "yellow" "[*] Montando sistemas de archivos..."
-    mount "/dev/mapper/vg_arch-root" "$INSTALL_ROOT"
-    mount "/dev/${DISK_SYSTEM}1" "${INSTALL_ROOT}/boot/efi"
-    swapon "/dev/mapper/vg_arch-swap"
+    mount "/dev/mapper/vg_arch-root" "$INSTALL_ROOT" || {
+        print_msg "red" "[ERROR] Falló el montaje de la raíz"
+        return 1
+    }
+    
+    mount "/dev/${DISK_SYSTEM}1" "${INSTALL_ROOT}/boot/efi" || {
+        print_msg "red" "[ERROR] Falló el montaje de EFI"
+        return 1
+    }
+    
+    swapon "/dev/mapper/vg_arch-swap" || {
+        print_msg "red" "[ERROR] Falló al activar swap"
+        return 1
+    }
     
     # Montar sistemas virtuales para chroot
-    mount -t proc proc "${INSTALL_ROOT}/proc"
-    mount -t sysfs sys "${INSTALL_ROOT}/sys"
-    mount -o bind /dev "${INSTALL_ROOT}/dev"
+    mount -t proc proc "${INSTALL_ROOT}/proc" || print_msg "red" "[ADVERTENCIA] Falló montaje de /proc"
+    mount -t sysfs sys "${INSTALL_ROOT}/sys" || print_msg "red" "[ADVERTENCIA] Falló montaje de /sys"
+    mount -o bind /dev "${INSTALL_ROOT}/dev" || print_msg "red" "[ADVERTENCIA] Falló montaje de /dev"
+    mount -t devpts devpts "${INSTALL_ROOT}/dev/pts" || print_msg "red" "[ADVERTENCIA] Falló montaje de /dev/pts"
+    mount -t tmpfs tmpfs "${INSTALL_ROOT}/run" || print_msg "red" "[ADVERTENCIA] Falló montaje de /run"
+    
+    return 0
 }
 
 # Instalación de paquetes con manejo de errores
@@ -140,21 +168,27 @@ install_packages() {
 
     print_msg "blue" "[*] Instalando ${#pkg_list[@]} paquetes..."
     
-    for pkg in "${pkg_list[@]}"; do
-        print_msg "blue" "Instalando $pkg..."
-        if pacstrap "$INSTALL_ROOT" "$pkg" --noconfirm --needed 2>/dev/null; then
-            print_msg "green" "[✓] $pkg instalado"
-        else
-            print_msg "red" "[✗] Error en $pkg"
-            echo "$pkg" >> "$FAILED_PKGS_FILE"
-            failed_pkgs+=("$pkg")
-        fi
-    done
+    # Instalar todos los paquetes juntos para mejor eficiencia
+    if ! pacstrap "$INSTALL_ROOT" "${pkg_list[@]}" --noconfirm --needed; then
+        print_msg "red" "[ERROR] Algunos paquetes fallaron, verificando individualmente..."
+        
+        for pkg in "${pkg_list[@]}"; do
+            if ! arch-chroot "$INSTALL_ROOT" pacman -S "$pkg" --noconfirm --needed 2>/dev/null; then
+                print_msg "red" "[✗] Error en $pkg"
+                echo "$pkg" >> "$FAILED_PKGS_FILE"
+                failed_pkgs+=("$pkg")
+            else
+                print_msg "green" "[✓] $pkg instalado"
+            fi
+        done
 
-    if [ ${#failed_pkgs[@]} -gt 0 ]; then
-        print_msg "yellow" "Advertencia: ${#failed_pkgs[@]} paquetes fallaron (ver $FAILED_PKGS_FILE)"
-        echo "=== Paquetes con errores ===" >> "$FAILED_PKGS_FILE"
-        printf '%s\n' "${failed_pkgs[@]}" >> "$FAILED_PKGS_FILE"
+        if [ ${#failed_pkgs[@]} -gt 0 ]; then
+            print_msg "yellow" "Advertencia: ${#failed_pkgs[@]} paquetes fallaron (ver $FAILED_PKGS_FILE)"
+            echo "=== Paquetes con errores ===" >> "$FAILED_PKGS_FILE"
+            printf '%s\n' "${failed_pkgs[@]}" >> "$FAILED_PKGS_FILE"
+        fi
+    else
+        print_msg "green" "[✓] Todos los paquetes instalados correctamente"
     fi
 }
 
@@ -163,44 +197,56 @@ configure_system() {
     print_msg "yellow" "[*] Configurando sistema..."
     
     # Generar fstab
-    genfstab -U "$INSTALL_ROOT" >> "${INSTALL_ROOT}/etc/fstab"
+    genfstab -U "$INSTALL_ROOT" >> "${INSTALL_ROOT}/etc/fstab" || {
+        print_msg "red" "[ERROR] Falló al generar fstab"
+        return 1
+    }
     
     # Configuración básica desde chroot
     arch-chroot "$INSTALL_ROOT" bash <<EOF
     # Configuración básica
-    ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime
-    hwclock --systohc
-    echo "LANG=$LANG" > /etc/locale.conf
-    echo "KEYMAP=$KEYMAP" > /etc/vconsole.conf
-    echo "$HOSTNAME" > /etc/hostname
-    sed -i '/en_US.UTF-8/s/^#//g' /etc/locale.gen
-    locale-gen
+    ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime || exit 1
+    hwclock --systohc || exit 1
+    echo "LANG=$LANG" > /etc/locale.conf || exit 1
+    echo "KEYMAP=$KEYMAP" > /etc/vconsole.conf || exit 1
+    echo "$HOSTNAME" > /etc/hostname || exit 1
+    sed -i '/en_US.UTF-8/s/^#//g' /etc/locale.gen || exit 1
+    locale-gen || exit 1
 
     # Initramfs con soporte para LUKS y ZFS
-    sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect modconf block encrypt lvm2 filesystems fsck zfs)/' /etc/mkinitcpio.conf
-    mkinitcpio -P
+    sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect modconf block encrypt lvm2 filesystems fsck zfs)/' /etc/mkinitcpio.conf || exit 1
+    mkinitcpio -P || exit 1
 
     # GRUB para EFI
-    grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB
-    echo "GRUB_CMDLINE_LINUX=\"cryptdevice=UUID=\$(blkid -s UUID -o value /dev/${DISK_SYSTEM}2):crypt-root root=/dev/mapper/vg_arch-root\"" >> /etc/default/grub
-    grub-mkconfig -o /boot/grub/grub.cfg
+    grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB || exit 1
+    echo "GRUB_CMDLINE_LINUX=\"cryptdevice=UUID=\$(blkid -s UUID -o value /dev/${DISK_SYSTEM}2):crypt-root root=/dev/mapper/vg_arch-root\"" >> /etc/default/grub || exit 1
+    grub-mkconfig -o /boot/grub/grub.cfg || exit 1
 
     # Usuario
-    echo "root:$ROOT_PASSWORD" | chpasswd
-    useradd -m -G wheel "$USERNAME"
-    echo "$USERNAME:$USER_PASSWORD" | chpasswd
-    echo "%wheel ALL=(ALL) ALL" >> /etc/sudoers
+    echo "root:$ROOT_PASSWORD" | chpasswd || exit 1
+    useradd -m -G wheel "$USERNAME" || exit 1
+    echo "$USERNAME:$USER_PASSWORD" | chpasswd || exit 1
+    echo "%wheel ALL=(ALL) ALL" >> /etc/sudoers || exit 1
 
     # Configurar ZFS si hay discos especificados
     if [ ${#DISK_ZFS[@]} -gt 0 ]; then
-        zpool create -f "$ZPOOL_NAME" "${DISK_ZFS[@]/#/\/dev\/}"
-        zfs create "$ZPOOL_NAME/data"
-        echo "$ZPOOL_NAME /$ZPOOL_NAME zfs defaults 0 0" >> /etc/fstab
+        zpool create -f "$ZPOOL_NAME" "${DISK_ZFS[@]/#/\/dev\/}" || exit 1
+        zfs create "$ZPOOL_NAME/data" || exit 1
+        echo "$ZPOOL_NAME /$ZPOOL_NAME zfs defaults 0 0" >> /etc/fstab || exit 1
     fi
 EOF
 
+    if [ $? -ne 0 ]; then
+        print_msg "red" "[ERROR] Falló la configuración en chroot"
+        return 1
+    fi
+
     # Configurar notificación post-reinicio
-    mkdir -p "${INSTALL_ROOT}/etc/profile.d"
+    mkdir -p "${INSTALL_ROOT}/etc/profile.d" || {
+        print_msg "red" "[ERROR] No se pudo crear /etc/profile.d"
+        return 1
+    }
+    
     cat <<EOF > "${INSTALL_ROOT}/etc/profile.d/show_failed_pkgs.sh"
 #!/bin/sh
 if [ -s "$FAILED_PKGS_FILE" ]; then
@@ -212,15 +258,29 @@ if [ -s "$FAILED_PKGS_FILE" ]; then
 fi
 EOF
 
-    chmod +x "${INSTALL_ROOT}/etc/profile.d/show_failed_pkgs.sh"
+    chmod +x "${INSTALL_ROOT}/etc/profile.d/show_failed_pkgs.sh" || {
+        print_msg "red" "[ERROR] No se pudo hacer ejecutable show_failed_pkgs.sh"
+        return 1
+    }
+    
+    return 0
 }
 
 # Limpieza final
 cleanup() {
     print_msg "yellow" "[*] Desmontando sistemas de archivos..."
-    umount -R "$INSTALL_ROOT"
-    swapoff -a
-    cryptsetup close crypt-root
+    
+    # Desmontar en orden inverso
+    umount -R "${INSTALL_ROOT}/run" 2>/dev/null
+    umount -R "${INSTALL_ROOT}/dev/pts" 2>/dev/null
+    umount -R "${INSTALL_ROOT}/dev" 2>/dev/null
+    umount -R "${INSTALL_ROOT}/proc" 2>/dev/null
+    umount -R "${INSTALL_ROOT}/sys" 2>/dev/null
+    swapoff -a 2>/dev/null
+    umount -R "${INSTALL_ROOT}/boot/efi" 2>/dev/null
+    umount -R "$INSTALL_ROOT" 2>/dev/null
+    
+    cryptsetup close crypt-root 2>/dev/null
     
     if [ -s "$FAILED_PKGS_FILE" ]; then
         print_msg "yellow" "Paquetes no instalados:"
@@ -237,18 +297,28 @@ main() {
     clear
     print_msg "green" "================================================"
     print_msg "green" "  INSTALADOR DE ARCH LINUX CON LUKS + ZFS"
-    print_msg "green" "  VERSIÓN CORREGIDA - MANEJO DE ERRORES MEJORADO"
+    print_msg "green" "  VERSIÓN FINAL CORREGIDA"
     print_msg "green" "================================================"
     
     init_logs
     check_root
     detect_env
-    prepare_mountpoints
     
-    # Flujo de instalación
-    setup_disks && \
-    install_packages base linux linux-firmware grub efibootmgr networkmanager lvm2 cryptsetup zfs-dkms zfs-utils vim sudo && \
-    configure_system && \
+    # Flujo de instalación con manejo de errores
+    if create_mount_structure && setup_disks; then
+        # Lista de paquetes base
+        BASE_PKGS=(
+            base linux linux-firmware grub efibootmgr 
+            networkmanager lvm2 cryptsetup 
+            zfs-dkms zfs-utils vim sudo
+        )
+        
+        install_packages "${BASE_PKGS[@]}"
+        configure_system
+    else
+        print_msg "red" "[ERROR] Falló la configuración inicial, no se puede continuar"
+    fi
+    
     cleanup
 }
 
