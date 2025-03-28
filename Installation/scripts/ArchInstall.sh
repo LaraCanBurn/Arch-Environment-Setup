@@ -13,13 +13,6 @@
 # - Manejo de errores mejorado
 # ==================================================
 
-#!/bin/bash
-
-# ==================================================
-# INSTALADOR DE ARCH LINUX CON LUKS/ZFS
-# VERSIÓN FINAL - ERRORES DE MONTAJE CORREGIDOS
-# ==================================================
-
 # --- Configuración inicial ---
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -29,14 +22,14 @@ NC='\033[0m'
 
 # Variables del sistema
 ZPOOL_NAME="raidz"
-USERNAME="archuser"
-ROOT_PASSWORD="archroot123"
-USER_PASSWORD="archuser123"
+USERNAME="LaraCanBurn"
+ROOT_PASSWORD="root"
+USER_PASSWORD="laracanburn"
 TIMEZONE="Europe/Madrid"
 LANG="en_US.UTF-8"
 KEYMAP="es"
-HOSTNAME="archzfs"
-INSTALL_ROOT="/mnt"  # Ruta corregida a /mnt
+HOSTNAME="Arch Linux"
+INSTALL_ROOT="/mnt"  # Ruta corregida definitivamente
 LOG_FILE="/var/log/installation.log"
 FAILED_PKGS_FILE="/var/log/failed_packages.log"
 
@@ -80,14 +73,25 @@ create_mount_structure() {
         return 1
     }
     
-    # Directorios específicos para montaje
-    local mount_dirs=("boot/efi" "proc" "sys" "dev" "dev/pts" "run")
+    # Directorios específicos para montaje (todos los necesarios)
+    local mount_dirs=(
+        "boot/efi" 
+        "proc" 
+        "sys" 
+        "dev" 
+        "dev/pts" 
+        "run"
+        "etc/profile.d"  # Añadido para el script post-instalación
+    )
+    
     for dir in "${mount_dirs[@]}"; do
-        mkdir -p "${INSTALL_ROOT}/${dir}" || {
-            print_msg "red" "[ERROR] No se pudo crear ${INSTALL_ROOT}/${dir}"
-            return 1
-        }
-        print_msg "green" "[✓] Directorio ${INSTALL_ROOT}/${dir} creado"
+        if [ ! -d "${INSTALL_ROOT}/${dir}" ]; then
+            mkdir -p "${INSTALL_ROOT}/${dir}" || {
+                print_msg "red" "[ERROR] No se pudo crear ${INSTALL_ROOT}/${dir}"
+                return 1
+            }
+            print_msg "green" "[✓] Directorio ${INSTALL_ROOT}/${dir} creado"
+        fi
     done
     
     return 0
@@ -173,39 +177,53 @@ setup_disks() {
 mount_filesystems() {
     print_msg "yellow" "[*] Montando sistemas de archivos..."
     
-    # Montar partición raíz
-    mount "/dev/mapper/vg_arch-root" "$INSTALL_ROOT" || {
-        print_msg "red" "[ERROR] Falló el montaje de la raíz"
+    # Montar partición raíz (verificación adicional)
+    if ! mount "/dev/mapper/vg_arch-root" "$INSTALL_ROOT"; then
+        print_msg "red" "[ERROR] Falló el montaje de la raíz en $INSTALL_ROOT"
         return 1
-    }
+    fi
     
-    # Verificar y crear directorio EFI si no existe
+    # Verificar y montar EFI
     if [ ! -d "${INSTALL_ROOT}/boot/efi" ]; then
-        print_msg "yellow" "[ADVERTENCIA] Directorio /boot/efi no existe, creándolo..."
         mkdir -p "${INSTALL_ROOT}/boot/efi" || {
             print_msg "red" "[ERROR] No se pudo crear ${INSTALL_ROOT}/boot/efi"
             return 1
         }
     fi
     
-    # Montar partición EFI
-    mount "/dev/${DISK_SYSTEM}1" "${INSTALL_ROOT}/boot/efi" || {
+    if ! mount "/dev/${DISK_SYSTEM}1" "${INSTALL_ROOT}/boot/efi"; then
         print_msg "red" "[ERROR] Falló el montaje de EFI"
         return 1
-    }
+    fi
     
     # Activar swap
-    swapon "/dev/mapper/vg_arch-swap" || {
+    if ! swapon "/dev/mapper/vg_arch-swap"; then
         print_msg "red" "[ERROR] Falló al activar swap"
         return 1
-    }
+    fi
     
-    # Montar sistemas virtuales para chroot
-    mount -t proc proc "${INSTALL_ROOT}/proc" || print_msg "yellow" "[ADVERTENCIA] Falló montaje de /proc"
-    mount -t sysfs sys "${INSTALL_ROOT}/sys" || print_msg "yellow" "[ADVERTENCIA] Falló montaje de /sys"
-    mount -o bind /dev "${INSTALL_ROOT}/dev" || print_msg "yellow" "[ADVERTENCIA] Falló montaje de /dev"
-    mount -t devpts devpts "${INSTALL_ROOT}/dev/pts" || print_msg "yellow" "[ADVERTENCIA] Falló montaje de /dev/pts"
-    mount -t tmpfs tmpfs "${INSTALL_ROOT}/run" || print_msg "yellow" "[ADVERTENCIA] Falló montaje de /run"
+    # Montar sistemas virtuales (con verificación de existencia)
+    local virtual_mounts=(
+        "proc:proc"
+        "sys:sysfs"
+        "dev:dev"
+        "dev/pts:devpts"
+        "run:tmpfs"
+    )
+    
+    for mount_point in "${virtual_mounts[@]}"; do
+        IFS=':' read -r target type <<< "$mount_point"
+        if [ ! -d "${INSTALL_ROOT}/${target}" ]; then
+            mkdir -p "${INSTALL_ROOT}/${target}" || {
+                print_msg "yellow" "[ADVERTENCIA] No se pudo crear ${INSTALL_ROOT}/${target}"
+                continue
+            }
+        fi
+        
+        if ! mount -t "$type" "$type" "${INSTALL_ROOT}/${target}"; then
+            print_msg "yellow" "[ADVERTENCIA] Falló montaje de ${target}"
+        fi
+    done
     
     return 0
 }
@@ -223,20 +241,20 @@ install_packages() {
 
     print_msg "blue" "[*] Instalando ${#pkg_list[@]} paquetes..."
     
-    # Primero sincronizar bases de datos
-    pacman -Sy || {
+    # Sincronizar bases de datos con verificación
+    if ! pacman -Sy; then
         print_msg "red" "[ERROR] Falló al sincronizar bases de datos"
         return 1
-    }
+    fi
 
-    # Instalar paquetes base esenciales primero
+    # Instalar paquetes base esenciales primero (con verificación)
     print_msg "blue" "[*] Instalando paquetes base esenciales..."
     if ! pacstrap "$INSTALL_ROOT" base linux linux-firmware --noconfirm --needed; then
         print_msg "red" "[ERROR] Falló la instalación de paquetes base"
         return 1
     fi
 
-    # Instalar el resto de paquetes
+    # Instalar el resto de paquetes uno por uno
     print_msg "blue" "[*] Instalando paquetes adicionales..."
     for pkg in "${pkg_list[@]}"; do
         # Saltar paquetes base ya instalados
@@ -249,6 +267,20 @@ install_packages() {
             print_msg "red" "[✗] Error en $pkg"
             echo "$pkg" >> "$FAILED_PKGS_FILE"
             failed_pkgs+=("$pkg")
+            
+            # Intentar instalar desde AUR si es ZFS
+            if [[ "$pkg" == "zfs-dkms" || "$pkg" == "zfs-utils" ]]; then
+                print_msg "yellow" "[!] Intentando instalar $pkg desde AUR..."
+                arch-chroot "$INSTALL_ROOT" bash -c "pacman -S --needed git base-devel && \
+                mkdir -p /tmp/aur && cd /tmp/aur && \
+                git clone https://aur.archlinux.org/${pkg}.git && \
+                cd ${pkg} && makepkg -si --noconfirm" && {
+                    print_msg "green" "[✓] $pkg instalado desde AUR"
+                    # Eliminar de la lista de fallados si tuvo éxito
+                    sed -i "/^${pkg}$/d" "$FAILED_PKGS_FILE"
+                    failed_pkgs=("${failed_pkgs[@]/$pkg}")
+                } || print_msg "red" "[✗] Falló instalación desde AUR para $pkg"
+            fi
         fi
     done
 
@@ -265,14 +297,14 @@ install_packages() {
 configure_system() {
     print_msg "yellow" "[*] Configurando sistema..."
     
-    # Generar fstab
-    genfstab -U "$INSTALL_ROOT" >> "${INSTALL_ROOT}/etc/fstab" || {
+    # Generar fstab con verificación
+    if ! genfstab -U "$INSTALL_ROOT" >> "${INSTALL_ROOT}/etc/fstab"; then
         print_msg "red" "[ERROR] Falló al generar fstab"
         return 1
-    }
+    fi
     
-    # Configuración básica desde chroot
-    arch-chroot "$INSTALL_ROOT" bash <<EOF
+    # Configuración básica desde chroot con mejor manejo de errores
+    if ! arch-chroot "$INSTALL_ROOT" bash <<EOF
     # Configuración básica
     ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime || exit 1
     hwclock --systohc || exit 1
@@ -304,8 +336,7 @@ configure_system() {
         echo "$ZPOOL_NAME /$ZPOOL_NAME zfs defaults 0 0" >> /etc/fstab || exit 1
     fi
 EOF
-
-    if [ $? -ne 0 ]; then
+    then
         print_msg "red" "[ERROR] Falló la configuración en chroot"
         return 1
     fi
@@ -324,6 +355,13 @@ if [ -s "$FAILED_PKGS_FILE" ]; then
     cat "$FAILED_PKGS_FILE" | grep -v '^===' | sort | uniq
     echo -e "\nInstálalos manualmente con:"
     echo -e "\033[1;36mpacman -S \$(cat $FAILED_PKGS_FILE | grep -v '^===' | tr '\n' ' ')\033[0m\n"
+    
+    # Opción para instalar desde AUR si son paquetes ZFS
+    if grep -q "zfs" "$FAILED_PKGS_FILE"; then
+        echo -e "\nPara paquetes ZFS, puedes intentar instalarlos desde AUR con:"
+        echo -e "\033[1;36myay -S \$(grep 'zfs' $FAILED_PKGS_FILE | tr '\n' ' ')\033[0m"
+        echo "Necesitarás tener yay instalado previamente"
+    fi
 fi
 EOF
 
@@ -339,21 +377,30 @@ EOF
 cleanup() {
     print_msg "yellow" "[*] Desmontando sistemas de archivos..."
     
-    # Desmontar en orden inverso
-    umount -R "${INSTALL_ROOT}/run" 2>/dev/null
-    umount -R "${INSTALL_ROOT}/dev/pts" 2>/dev/null
-    umount -R "${INSTALL_ROOT}/dev" 2>/dev/null
-    umount -R "${INSTALL_ROOT}/proc" 2>/dev/null
-    umount -R "${INSTALL_ROOT}/sys" 2>/dev/null
-    swapoff -a 2>/dev/null
-    umount -R "${INSTALL_ROOT}/boot/efi" 2>/dev/null
-    umount -R "$INSTALL_ROOT" 2>/dev/null
+    # Desmontar en orden inverso con manejo de errores
+    local mount_points=(
+        "${INSTALL_ROOT}/run"
+        "${INSTALL_ROOT}/dev/pts" 
+        "${INSTALL_ROOT}/dev"
+        "${INSTALL_ROOT}/proc"
+        "${INSTALL_ROOT}/sys"
+        "${INSTALL_ROOT}/boot/efi"
+        "$INSTALL_ROOT"
+    )
     
+    for point in "${mount_points[@]}"; do
+        if mountpoint -q "$point"; then
+            umount -R "$point" 2>/dev/null || print_msg "yellow" "[ADVERTENCIA] No se pudo desmontar $point"
+        fi
+    done
+    
+    swapoff -a 2>/dev/null
     cryptsetup close crypt-root 2>/dev/null
     
     if [ -s "$FAILED_PKGS_FILE" ]; then
         print_msg "yellow" "Paquetes no instalados:"
         grep -v '^===' "$FAILED_PKGS_FILE" | sort | uniq
+        print_msg "yellow" "Puedes instalarlos manualmente después del reinicio"
     fi
     
     print_msg "green" "[✓] ¡Instalación completada! Reiniciando en 10s..."
@@ -366,7 +413,7 @@ main() {
     clear
     print_msg "green" "================================================"
     print_msg "green" "  INSTALADOR DE ARCH LINUX CON LUKS + ZFS"
-    print_msg "green" "  VERSIÓN FINAL - ERRORES CORREGIDOS"
+    print_msg "green" "  VERSIÓN FINAL - TODOS LOS ERRORES CORREGIDOS"
     print_msg "green" "================================================"
     
     init_logs
@@ -375,8 +422,11 @@ main() {
     
     # Flujo de instalación con manejo de errores
     if create_mount_structure && setup_disks && mount_filesystems; then
-        install_packages
-        configure_system
+        if install_packages; then
+            configure_system
+        else
+            print_msg "red" "[ERROR] Hubo problemas con la instalación de paquetes"
+        fi
     else
         print_msg "red" "[ERROR] Falló la configuración inicial, no se puede continuar"
     fi
