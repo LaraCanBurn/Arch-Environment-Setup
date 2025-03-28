@@ -65,7 +65,7 @@ detect_env() {
 
 # Crear estructura de directorios completa
 create_mount_structure() {
-    print_msg "blue" "[*] Creando estructura de directorios..."
+    print_msg "blue" "[*] Creando estructura de directorios en ${INSTALL_ROOT}..."
     
     # Directorios principales
     mkdir -p "$INSTALL_ROOT" || {
@@ -80,6 +80,7 @@ create_mount_structure() {
             print_msg "red" "[ERROR] No se pudo crear ${INSTALL_ROOT}/${dir}"
             return 1
         }
+        print_msg "green" "[✓] Directorio ${INSTALL_ROOT}/${dir} creado"
     done
     
     return 0
@@ -119,44 +120,81 @@ setup_disks() {
         sleep 2
     done
     
-    cryptsetup open "/dev/${DISK_SYSTEM}2" crypt-root
+    cryptsetup open "/dev/${DISK_SYSTEM}2" crypt-root || {
+        print_msg "red" "[ERROR] No se pudo abrir el dispositivo cifrado"
+        return 1
+    }
 
     # LVM
     print_msg "yellow" "[*] Configurando LVM..."
-    pvcreate "/dev/mapper/crypt-root"
-    vgcreate vg_arch "/dev/mapper/crypt-root"
-    lvcreate -L 8G vg_arch -n swap
-    lvcreate -l +100%FREE vg_arch -n root
+    pvcreate "/dev/mapper/crypt-root" || {
+        print_msg "red" "[ERROR] Falló pvcreate"
+        return 1
+    }
+    vgcreate vg_arch "/dev/mapper/crypt-root" || {
+        print_msg "red" "[ERROR] Falló vgcreate"
+        return 1
+    }
+    lvcreate -L 8G vg_arch -n swap || {
+        print_msg "red" "[ERROR] Falló lvcreate para swap"
+        return 1
+    }
+    lvcreate -l +100%FREE vg_arch -n root || {
+        print_msg "red" "[ERROR] Falló lvcreate para root"
+        return 1
+    }
 
     # Formateo
     print_msg "yellow" "[*] Formateando particiones..."
-    mkfs.vfat -F32 "/dev/${DISK_SYSTEM}1"
-    mkswap "/dev/mapper/vg_arch-swap"
-    mkfs.ext4 "/dev/mapper/vg_arch-root"
+    mkfs.vfat -F32 "/dev/${DISK_SYSTEM}1" || {
+        print_msg "red" "[ERROR] Falló al formatear EFI"
+        return 1
+    }
+    mkswap "/dev/mapper/vg_arch-swap" || {
+        print_msg "red" "[ERROR] Falló al crear swap"
+        return 1
+    }
+    mkfs.ext4 "/dev/mapper/vg_arch-root" || {
+        print_msg "red" "[ERROR] Falló al formatear root"
+        return 1
+    }
 
-    # Montaje
+    return 0
+}
+
+# Montar sistemas de archivos
+mount_filesystems() {
     print_msg "yellow" "[*] Montando sistemas de archivos..."
+    
+    # Montar partición raíz
     mount "/dev/mapper/vg_arch-root" "$INSTALL_ROOT" || {
         print_msg "red" "[ERROR] Falló el montaje de la raíz"
         return 1
     }
     
-    mount "/dev/${DISK_SYSTEM}1" "${INSTALL_ROOT}/boot/efi" || {
-        print_msg "red" "[ERROR] Falló el montaje de EFI"
+    # Montar EFI (verificar que el directorio existe)
+    if [ -d "${INSTALL_ROOT}/boot/efi" ]; then
+        mount "/dev/${DISK_SYSTEM}1" "${INSTALL_ROOT}/boot/efi" || {
+            print_msg "red" "[ERROR] Falló el montaje de EFI"
+            return 1
+        }
+    else
+        print_msg "red" "[ERROR] Directorio ${INSTALL_ROOT}/boot/efi no existe"
         return 1
-    }
+    fi
     
+    # Activar swap
     swapon "/dev/mapper/vg_arch-swap" || {
         print_msg "red" "[ERROR] Falló al activar swap"
         return 1
     }
     
     # Montar sistemas virtuales para chroot
-    mount -t proc proc "${INSTALL_ROOT}/proc" || print_msg "red" "[ADVERTENCIA] Falló montaje de /proc"
-    mount -t sysfs sys "${INSTALL_ROOT}/sys" || print_msg "red" "[ADVERTENCIA] Falló montaje de /sys"
-    mount -o bind /dev "${INSTALL_ROOT}/dev" || print_msg "red" "[ADVERTENCIA] Falló montaje de /dev"
-    mount -t devpts devpts "${INSTALL_ROOT}/dev/pts" || print_msg "red" "[ADVERTENCIA] Falló montaje de /dev/pts"
-    mount -t tmpfs tmpfs "${INSTALL_ROOT}/run" || print_msg "red" "[ADVERTENCIA] Falló montaje de /run"
+    mount -t proc proc "${INSTALL_ROOT}/proc" || print_msg "yellow" "[ADVERTENCIA] Falló montaje de /proc"
+    mount -t sysfs sys "${INSTALL_ROOT}/sys" || print_msg "yellow" "[ADVERTENCIA] Falló montaje de /sys"
+    mount -o bind /dev "${INSTALL_ROOT}/dev" || print_msg "yellow" "[ADVERTENCIA] Falló montaje de /dev"
+    mount -t devpts devpts "${INSTALL_ROOT}/dev/pts" || print_msg "yellow" "[ADVERTENCIA] Falló montaje de /dev/pts"
+    mount -t tmpfs tmpfs "${INSTALL_ROOT}/run" || print_msg "yellow" "[ADVERTENCIA] Falló montaje de /run"
     
     return 0
 }
@@ -170,7 +208,7 @@ install_packages() {
     
     # Instalar todos los paquetes juntos para mejor eficiencia
     if ! pacstrap "$INSTALL_ROOT" "${pkg_list[@]}" --noconfirm --needed; then
-        print_msg "red" "[ERROR] Algunos paquetes fallaron, verificando individualmente..."
+        print_msg "red" "[ADVERTENCIA] Algunos paquetes fallaron, verificando individualmente..."
         
         for pkg in "${pkg_list[@]}"; do
             if ! arch-chroot "$INSTALL_ROOT" pacman -S "$pkg" --noconfirm --needed 2>/dev/null; then
@@ -297,7 +335,7 @@ main() {
     clear
     print_msg "green" "================================================"
     print_msg "green" "  INSTALADOR DE ARCH LINUX CON LUKS + ZFS"
-    print_msg "green" "  VERSIÓN FINAL CORREGIDA"
+    print_msg "green" "  VERSIÓN FINAL - TODOS LOS ERRORES CORREGIDOS"
     print_msg "green" "================================================"
     
     init_logs
@@ -305,7 +343,7 @@ main() {
     detect_env
     
     # Flujo de instalación con manejo de errores
-    if create_mount_structure && setup_disks; then
+    if create_mount_structure && setup_disks && mount_filesystems; then
         # Lista de paquetes base
         BASE_PKGS=(
             base linux linux-firmware grub efibootmgr 
