@@ -13,13 +13,6 @@
 # - Manejo de errores mejorado
 # ==================================================
 
-#!/bin/bash
-
-# ==================================================
-# INSTALADOR DE ARCH LINUX CON LUKS/ZFS
-# VERSIÓN FINAL - ERRORES DE RUTAS CORREGIDOS
-# ==================================================
-
 # --- Configuración inicial ---
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -81,7 +74,7 @@ create_mount_structure() {
     }
     
     # Directorios específicos para montaje
-    local mount_dirs=("boot/efi" "proc" "sys" "dev" "run")
+    local mount_dirs=("boot/efi" "proc" "sys" "dev" "dev/pts" "run")
     for dir in "${mount_dirs[@]}"; do
         mkdir -p "${INSTALL_ROOT}/${dir}" || {
             print_msg "red" "[ERROR] No se pudo crear ${INSTALL_ROOT}/${dir}"
@@ -179,15 +172,6 @@ mount_filesystems() {
         return 1
     }
     
-    # Crear directorio EFI si no existe (corrección para el error reportado)
-    if [ ! -d "${INSTALL_ROOT}/boot/efi" ]; then
-        print_msg "yellow" "[ADVERTENCIA] Directorio /boot/efi no existe, creándolo..."
-        mkdir -p "${INSTALL_ROOT}/boot/efi" || {
-            print_msg "red" "[ERROR] No se pudo crear ${INSTALL_ROOT}/boot/efi"
-            return 1
-        }
-    fi
-    
     # Montar EFI
     mount "/dev/${DISK_SYSTEM}1" "${INSTALL_ROOT}/boot/efi" || {
         print_msg "red" "[ERROR] Falló el montaje de EFI"
@@ -212,33 +196,53 @@ mount_filesystems() {
 
 # Instalación de paquetes con manejo de errores
 install_packages() {
-    local pkg_list=("$@")
+    local pkg_list=(
+        "base" "linux" "linux-firmware" 
+        "grub" "efibootmgr" "networkmanager" 
+        "lvm2" "cryptsetup" 
+        "zfs-dkms" "zfs-utils" 
+        "vim" "sudo"
+    )
     local failed_pkgs=()
 
     print_msg "blue" "[*] Instalando ${#pkg_list[@]} paquetes..."
     
-    # Instalar todos los paquetes juntos para mejor eficiencia
-    if ! pacstrap "$INSTALL_ROOT" "${pkg_list[@]}" --noconfirm --needed; then
-        print_msg "red" "[ADVERTENCIA] Algunos paquetes fallaron, verificando individualmente..."
-        
-        for pkg in "${pkg_list[@]}"; do
-            if ! arch-chroot "$INSTALL_ROOT" pacman -S "$pkg" --noconfirm --needed 2>/dev/null; then
-                print_msg "red" "[✗] Error en $pkg"
-                echo "$pkg" >> "$FAILED_PKGS_FILE"
-                failed_pkgs+=("$pkg")
-            else
-                print_msg "green" "[✓] $pkg instalado"
-            fi
-        done
+    # Primero sincronizar bases de datos
+    pacman -Sy || {
+        print_msg "red" "[ERROR] Falló al sincronizar bases de datos"
+        return 1
+    }
 
-        if [ ${#failed_pkgs[@]} -gt 0 ]; then
-            print_msg "yellow" "Advertencia: ${#failed_pkgs[@]} paquetes fallaron (ver $FAILED_PKGS_FILE)"
-            echo "=== Paquetes con errores ===" >> "$FAILED_PKGS_FILE"
-            printf '%s\n' "${failed_pkgs[@]}" >> "$FAILED_PKGS_FILE"
-        fi
-    else
-        print_msg "green" "[✓] Todos los paquetes instalados correctamente"
+    # Instalar paquetes base esenciales primero
+    print_msg "blue" "[*] Instalando paquetes base esenciales..."
+    if ! pacstrap "$INSTALL_ROOT" base linux linux-firmware --noconfirm --needed; then
+        print_msg "red" "[ERROR] Falló la instalación de paquetes base"
+        return 1
     fi
+
+    # Instalar el resto de paquetes
+    print_msg "blue" "[*] Instalando paquetes adicionales..."
+    for pkg in "${pkg_list[@]}"; do
+        # Saltar paquetes base ya instalados
+        [[ "$pkg" == "base" || "$pkg" == "linux" || "$pkg" == "linux-firmware" ]] && continue
+        
+        print_msg "blue" "Instalando $pkg..."
+        if arch-chroot "$INSTALL_ROOT" pacman -S "$pkg" --noconfirm --needed 2>/dev/null; then
+            print_msg "green" "[✓] $pkg instalado"
+        else
+            print_msg "red" "[✗] Error en $pkg"
+            echo "$pkg" >> "$FAILED_PKGS_FILE"
+            failed_pkgs+=("$pkg")
+        fi
+    done
+
+    if [ ${#failed_pkgs[@]} -gt 0 ]; then
+        print_msg "yellow" "Advertencia: ${#failed_pkgs[@]} paquetes fallaron (ver $FAILED_PKGS_FILE)"
+        echo "=== Paquetes con errores ===" >> "$FAILED_PKGS_FILE"
+        printf '%s\n' "${failed_pkgs[@]}" >> "$FAILED_PKGS_FILE"
+    fi
+
+    return 0
 }
 
 # Configuración del sistema
@@ -346,7 +350,7 @@ main() {
     clear
     print_msg "green" "================================================"
     print_msg "green" "  INSTALADOR DE ARCH LINUX CON LUKS + ZFS"
-    print_msg "green" "  VERSIÓN FINAL - ERRORES DE RUTAS CORREGIDOS"
+    print_msg "green" "  VERSIÓN FINAL - TODOS LOS ERRORES CORREGIDOS"
     print_msg "green" "================================================"
     
     init_logs
@@ -355,14 +359,7 @@ main() {
     
     # Flujo de instalación con manejo de errores
     if create_mount_structure && setup_disks && mount_filesystems; then
-        # Lista de paquetes base
-        BASE_PKGS=(
-            base linux linux-firmware grub efibootmgr 
-            networkmanager lvm2 cryptsetup 
-            zfs-dkms zfs-utils vim sudo
-        )
-        
-        install_packages "${BASE_PKGS[@]}"
+        install_packages
         configure_system
     else
         print_msg "red" "[ERROR] Falló la configuración inicial, no se puede continuar"
