@@ -472,64 +472,64 @@ function main() {
     echo -e "${GREEN}==================================================${NC}"
     
     # Menú principal
-    echo -e "\n${BLUE}Selecciona una opción:${NC}"
-    echo "1) Ejecutar instalación completa"
-    echo "2) Ejecutar tests unitarios"
-    echo "3) Hacer backup de cabeceras LUKS en USB"
-    echo "4) Salir"
+    # echo -e "\n${BLUE}Selecciona una opción:${NC}"
+    # echo "1) Ejecutar instalación completa"
+    # echo "2) Ejecutar tests unitarios"
+    # echo "3) Hacer backup de cabeceras LUKS en USB"
+    # echo "4) Salir"
     
-    read -p "Opción: " main_choice
+    # read -p "Opción: " main_choice
     
-    case $main_choice in
-        1)
-            check_root
-            detect_env
+    # case $main_choice in
+    #     1)
+    #         check_root
+    #         detect_env
             
-            if [ -f "$PHASE_FILE" ]; then
-                CURRENT_PHASE=$(cat "$PHASE_FILE")
-            else
-                CURRENT_PHASE="1"
-                echo "1" > "$PHASE_FILE"
-            fi
+    #         if [ -f "$PHASE_FILE" ]; then
+    #             CURRENT_PHASE=$(cat "$PHASE_FILE")
+    #         else
+    #             CURRENT_PHASE="1"
+    #             echo "1" > "$PHASE_FILE"
+    #         fi
             
-            case $CURRENT_PHASE in
-                "1")
-                    echo -e "${BLUE}[*] Fase 1: Configuración inicial${NC}"
-                    setup_disks
-                    install_base_system
-                    echo "2" > "$PHASE_FILE"
-                    handle_reboot
-                    ;;
-                "2")
-                    echo -e "${BLUE}[*] Fase 2: Configuración post-reinicio${NC}"
-                    configure_system
-                    setup_zfs
-                    setup_user
-                    install_vm_tools
-                    rm -f "$PHASE_FILE"
-                    echo -e "${GREEN}[+] ¡Instalación completada con éxito!${NC}"
-                    ;;
-                *)
-                    echo -e "${RED}[ERROR] Fase de instalación desconocida${NC}"
-                    exit 1
-                    ;;
-            esac
-            ;;
-        2)
-            run_tests
-            ;;
-        3)
-            check_root
-            backup_luks_headers
-            ;;
-        4)
-            exit 0
-            ;;
-        *)
-            echo -e "${RED}[ERROR] Opción inválida${NC}"
-            exit 1
-            ;;
-    esac
+    #         case $CURRENT_PHASE in
+    #             "1")
+    #                 echo -e "${BLUE}[*] Fase 1: Configuración inicial${NC}"
+    #                 setup_disks
+    #                 install_base_system
+    #                 echo "2" > "$PHASE_FILE"
+    #                 handle_reboot
+    #                 ;;
+    #             "2")
+    #                 echo -e "${BLUE}[*] Fase 2: Configuración post-reinicio${NC}"
+    #                 configure_system
+    #                 setup_zfs
+    #                 setup_user
+    #                 install_vm_tools
+    #                 rm -f "$PHASE_FILE"
+    #                 echo -e "${GREEN}[+] ¡Instalación completada con éxito!${NC}"
+    #                 ;;
+    #             *)
+    #                 echo -e "${RED}[ERROR] Fase de instalación desconocida${NC}"
+    #                 exit 1
+    #                 ;;
+    #         esac
+    #         ;;
+    #     2)
+    #         run_tests
+    #         ;;
+    #     3)
+    #         check_root
+    #         backup_luks_headers
+    #         ;;
+    #     4)
+    #         exit 0
+    #         ;;
+    #     *)
+    #         echo -e "${RED}[ERROR] Opción inválida${NC}"
+    #         exit 1
+    #         ;;
+    # esac
 }
 
 # --- Ejecutar instalador ---
