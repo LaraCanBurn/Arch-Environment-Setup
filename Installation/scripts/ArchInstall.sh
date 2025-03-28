@@ -20,16 +20,16 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-# Variables del sistema
+# Variables personalizadas
 ZPOOL_NAME="raidz"
 USERNAME="LaraCanBurn"
-ROOT_PASSWORD="root"
-USER_PASSWORD="laracanburn"
+ROOT_PASSWORD="root"          # Contraseña para root
+USER_PASSWORD="laracanburn"   # Contraseña para el usuario
 TIMEZONE="Europe/Madrid"
 LANG="en_US.UTF-8"
 KEYMAP="es"
-HOSTNAME="Arch Linux"
-INSTALL_ROOT="/mnt"  # Ruta corregida definitivamente
+HOSTNAME="ArchLinux"          # Nombre del host personalizado
+INSTALL_ROOT="/mnt"
 LOG_FILE="/var/log/installation.log"
 FAILED_PKGS_FILE="/var/log/failed_packages.log"
 
@@ -57,23 +57,77 @@ check_root() {
     [ "$(id -u)" -ne 0 ] && print_msg "red" "ERROR: Ejecuta como root. Usa 'sudo -i' en el live USB." && exit 1
 }
 
-# Detectar entorno (VM/físico)
-detect_env() {
-    ENV=$(dmidecode -s system-product-name | awk '{print tolower($0)}' | grep -E 'vmware|virtualbox|qemu' || echo "physical")
-    print_msg "blue" "[INFO] Entorno detectado: ${ENV}"
+# Instalar dependencias para ZFS
+install_zfs_dependencies() {
+    print_msg "blue" "[*] Instalando dependencias para ZFS..."
+    
+    pacman -Sy --needed --noconfirm git base-devel linux-headers dkms || {
+        print_msg "red" "[ERROR] Falló al instalar dependencias para ZFS"
+        return 1
+    }
+    
+    if ! pacman -Si zfs-dkms &>/dev/null; then
+        print_msg "yellow" "[!] ZFS no está en los repositorios oficiales, instalando desde AUR..."
+        
+        useradd -m -s /bin/bash aur_builder || {
+            print_msg "red" "[ERROR] No se pudo crear usuario para AUR"
+            return 1
+        }
+        
+        sudo -u aur_builder bash -c '
+            cd /tmp
+            git clone https://aur.archlinux.org/yay.git
+            cd yay
+            makepkg -si --noconfirm
+        ' || {
+            print_msg "red" "[ERROR] Falló al instalar yay"
+            return 1
+        }
+        
+        sudo -u aur_builder yay -S --noconfirm zfs-dkms zfs-utils || {
+            print_msg "red" "[ERROR] Falló al instalar ZFS desde AUR"
+            return 1
+        }
+    else
+        pacman -S --noconfirm zfs-dkms zfs-utils || {
+            print_msg "red" "[ERROR] Falló al instalar ZFS desde repositorios"
+            return 1
+        }
+    fi
+    
+    return 0
 }
 
-# Crear estructura de directorios completa
-create_mount_structure() {
-    print_msg "blue" "[*] Creando estructura de directorios en ${INSTALL_ROOT}..."
+# Configurar hooks ZFS en mkinitcpio
+configure_zfs_hooks() {
+    print_msg "blue" "[*] Configurando hooks ZFS..."
     
-    # Directorios principales
+    if ! ls /usr/lib/modules/*/extra/zfs &>/dev/null; then
+        print_msg "red" "[ERROR] Módulos ZFS no encontrados"
+        return 1
+    fi
+    
+    sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect modconf block encrypt lvm2 filesystems fsck zfs)/' /etc/mkinitcpio.conf || {
+        print_msg "red" "[ERROR] Falló al configurar hooks en mkinitcpio.conf"
+        return 1
+    }
+    
+    mkinitcpio -P || {
+        print_msg "yellow" "[ADVERTENCIA] Hubo advertencias al generar initramfs"
+    }
+    
+    return 0
+}
+
+# Crear estructura de directorios
+create_mount_structure() {
+    print_msg "blue" "[*] Creando estructura de directorios..."
+    
     mkdir -p "$INSTALL_ROOT" || {
         print_msg "red" "[ERROR] No se pudo crear $INSTALL_ROOT"
         return 1
     }
     
-    # Directorios específicos para montaje (todos los necesarios)
     local mount_dirs=(
         "boot/efi" 
         "proc" 
@@ -81,7 +135,7 @@ create_mount_structure() {
         "dev" 
         "dev/pts" 
         "run"
-        "etc/profile.d"  # Añadido para el script post-instalación
+        "etc/profile.d"
     )
     
     for dir in "${mount_dirs[@]}"; do
@@ -105,26 +159,22 @@ setup_disks() {
     read -p "Disco para sistema (ej: sda): " DISK_SYSTEM
     read -p "Discos para ZFS (ej: sdb sdc): " -a DISK_ZFS
 
-    # Validación de discos
     for disk in "$DISK_SYSTEM" "${DISK_ZFS[@]}"; do
         [ ! -b "/dev/$disk" ] && print_msg "red" "[ERROR] Disco $disk no válido" && return 1
     done
 
-    # Limpiar discos
     print_msg "yellow" "[*] Limpiando tablas de particiones..."
     for disk in "$DISK_SYSTEM" "${DISK_ZFS[@]}"; do
         wipefs -a "/dev/$disk"
         dd if=/dev/zero of="/dev/$disk" bs=1M count=100
     done
 
-    # Particionado (EFI sin cifrar)
     print_msg "yellow" "[*] Creando particiones..."
     parted -s "/dev/$DISK_SYSTEM" mklabel gpt
     parted -s "/dev/$DISK_SYSTEM" mkpart primary fat32 1MiB 513MiB
     parted -s "/dev/$DISK_SYSTEM" set 1 esp on
     parted -s "/dev/$DISK_SYSTEM" mkpart primary ext4 513MiB 100%
 
-    # Cifrado solo para raíz
     print_msg "yellow" "[*] Configurando cifrado LUKS..."
     until cryptsetup luksFormat --type luks2 "/dev/${DISK_SYSTEM}2"; do
         print_msg "red" "[ERROR] Falló el cifrado, reintentando..."
@@ -136,7 +186,6 @@ setup_disks() {
         return 1
     }
 
-    # LVM
     print_msg "yellow" "[*] Configurando LVM..."
     pvcreate "/dev/mapper/crypt-root" || {
         print_msg "red" "[ERROR] Falló pvcreate"
@@ -155,7 +204,6 @@ setup_disks() {
         return 1
     }
 
-    # Formateo
     print_msg "yellow" "[*] Formateando particiones..."
     mkfs.vfat -F32 "/dev/${DISK_SYSTEM}1" || {
         print_msg "red" "[ERROR] Falló al formatear EFI"
@@ -177,13 +225,11 @@ setup_disks() {
 mount_filesystems() {
     print_msg "yellow" "[*] Montando sistemas de archivos..."
     
-    # Montar partición raíz (verificación adicional)
     if ! mount "/dev/mapper/vg_arch-root" "$INSTALL_ROOT"; then
         print_msg "red" "[ERROR] Falló el montaje de la raíz en $INSTALL_ROOT"
         return 1
     fi
     
-    # Verificar y montar EFI
     if [ ! -d "${INSTALL_ROOT}/boot/efi" ]; then
         mkdir -p "${INSTALL_ROOT}/boot/efi" || {
             print_msg "red" "[ERROR] No se pudo crear ${INSTALL_ROOT}/boot/efi"
@@ -196,13 +242,11 @@ mount_filesystems() {
         return 1
     fi
     
-    # Activar swap
     if ! swapon "/dev/mapper/vg_arch-swap"; then
         print_msg "red" "[ERROR] Falló al activar swap"
         return 1
     fi
     
-    # Montar sistemas virtuales (con verificación de existencia)
     local virtual_mounts=(
         "proc:proc"
         "sys:sysfs"
@@ -228,7 +272,7 @@ mount_filesystems() {
     return 0
 }
 
-# Instalación de paquetes con manejo de errores
+# Instalación de paquetes
 install_packages() {
     local pkg_list=(
         "base" "linux" "linux-firmware" 
@@ -241,23 +285,19 @@ install_packages() {
 
     print_msg "blue" "[*] Instalando ${#pkg_list[@]} paquetes..."
     
-    # Sincronizar bases de datos con verificación
     if ! pacman -Sy; then
         print_msg "red" "[ERROR] Falló al sincronizar bases de datos"
         return 1
     fi
 
-    # Instalar paquetes base esenciales primero (con verificación)
     print_msg "blue" "[*] Instalando paquetes base esenciales..."
     if ! pacstrap "$INSTALL_ROOT" base linux linux-firmware --noconfirm --needed; then
         print_msg "red" "[ERROR] Falló la instalación de paquetes base"
         return 1
     fi
 
-    # Instalar el resto de paquetes uno por uno
     print_msg "blue" "[*] Instalando paquetes adicionales..."
     for pkg in "${pkg_list[@]}"; do
-        # Saltar paquetes base ya instalados
         [[ "$pkg" == "base" || "$pkg" == "linux" || "$pkg" == "linux-firmware" ]] && continue
         
         print_msg "blue" "Instalando $pkg..."
@@ -268,7 +308,6 @@ install_packages() {
             echo "$pkg" >> "$FAILED_PKGS_FILE"
             failed_pkgs+=("$pkg")
             
-            # Intentar instalar desde AUR si es ZFS
             if [[ "$pkg" == "zfs-dkms" || "$pkg" == "zfs-utils" ]]; then
                 print_msg "yellow" "[!] Intentando instalar $pkg desde AUR..."
                 arch-chroot "$INSTALL_ROOT" bash -c "pacman -S --needed git base-devel && \
@@ -276,7 +315,6 @@ install_packages() {
                 git clone https://aur.archlinux.org/${pkg}.git && \
                 cd ${pkg} && makepkg -si --noconfirm" && {
                     print_msg "green" "[✓] $pkg instalado desde AUR"
-                    # Eliminar de la lista de fallados si tuvo éxito
                     sed -i "/^${pkg}$/d" "$FAILED_PKGS_FILE"
                     failed_pkgs=("${failed_pkgs[@]/$pkg}")
                 } || print_msg "red" "[✗] Falló instalación desde AUR para $pkg"
@@ -297,15 +335,40 @@ install_packages() {
 configure_system() {
     print_msg "yellow" "[*] Configurando sistema..."
     
-    # Generar fstab con verificación
     if ! genfstab -U "$INSTALL_ROOT" >> "${INSTALL_ROOT}/etc/fstab"; then
         print_msg "red" "[ERROR] Falló al generar fstab"
         return 1
     fi
     
-    # Configuración básica desde chroot con mejor manejo de errores
-    if ! arch-chroot "$INSTALL_ROOT" bash <<EOF
-    # Configuración básica
+    if [ ${#DISK_ZFS[@]} -gt 0 ]; then
+        arch-chroot "$INSTALL_ROOT" bash <<EOF
+        modprobe zfs || {
+            echo "Failed to load ZFS module"
+            exit 1
+        }
+        
+        zpool create -f "$ZPOOL_NAME" ${DISK_ZFS[@]/#/\/dev\/} || {
+            echo "Failed to create ZFS pool"
+            exit 1
+        }
+        
+        zfs create "$ZPOOL_NAME/data" || {
+            echo "Failed to create ZFS filesystem"
+            exit 1
+        }
+        
+        echo "$ZPOOL_NAME /$ZPOOL_NAME zfs defaults 0 0" >> /etc/fstab || {
+            echo "Failed to configure ZFS in fstab"
+            exit 1
+        }
+EOF
+        if [ $? -ne 0 ]; then
+            print_msg "red" "[ERROR] Falló la configuración de ZFS"
+            return 1
+        fi
+    fi
+    
+    arch-chroot "$INSTALL_ROOT" bash <<EOF
     ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime || exit 1
     hwclock --systohc || exit 1
     echo "LANG=$LANG" > /etc/locale.conf || exit 1
@@ -314,34 +377,24 @@ configure_system() {
     sed -i '/en_US.UTF-8/s/^#//g' /etc/locale.gen || exit 1
     locale-gen || exit 1
 
-    # Initramfs con soporte para LUKS y ZFS
     sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect modconf block encrypt lvm2 filesystems fsck zfs)/' /etc/mkinitcpio.conf || exit 1
     mkinitcpio -P || exit 1
 
-    # GRUB para EFI
     grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB || exit 1
     echo "GRUB_CMDLINE_LINUX=\"cryptdevice=UUID=\$(blkid -s UUID -o value /dev/${DISK_SYSTEM}2):crypt-root root=/dev/mapper/vg_arch-root\"" >> /etc/default/grub || exit 1
     grub-mkconfig -o /boot/grub/grub.cfg || exit 1
 
-    # Usuario
     echo "root:$ROOT_PASSWORD" | chpasswd || exit 1
     useradd -m -G wheel "$USERNAME" || exit 1
     echo "$USERNAME:$USER_PASSWORD" | chpasswd || exit 1
     echo "%wheel ALL=(ALL) ALL" >> /etc/sudoers || exit 1
-
-    # Configurar ZFS si hay discos especificados
-    if [ ${#DISK_ZFS[@]} -gt 0 ]; then
-        zpool create -f "$ZPOOL_NAME" "${DISK_ZFS[@]/#/\/dev\/}" || exit 1
-        zfs create "$ZPOOL_NAME/data" || exit 1
-        echo "$ZPOOL_NAME /$ZPOOL_NAME zfs defaults 0 0" >> /etc/fstab || exit 1
-    fi
 EOF
-    then
+
+    if [ $? -ne 0 ]; then
         print_msg "red" "[ERROR] Falló la configuración en chroot"
         return 1
     fi
 
-    # Configurar notificación post-reinicio
     mkdir -p "${INSTALL_ROOT}/etc/profile.d" || {
         print_msg "red" "[ERROR] No se pudo crear /etc/profile.d"
         return 1
@@ -353,14 +406,16 @@ if [ -s "$FAILED_PKGS_FILE" ]; then
     echo -e "\n\033[1;31m■ PAQUETES FALTANTES ■\033[0m"
     echo "----------------------------"
     cat "$FAILED_PKGS_FILE" | grep -v '^===' | sort | uniq
-    echo -e "\nInstálalos manualmente con:"
-    echo -e "\033[1;36mpacman -S \$(cat $FAILED_PKGS_FILE | grep -v '^===' | tr '\n' ' ')\033[0m\n"
     
-    # Opción para instalar desde AUR si son paquetes ZFS
     if grep -q "zfs" "$FAILED_PKGS_FILE"; then
-        echo -e "\nPara paquetes ZFS, puedes intentar instalarlos desde AUR con:"
-        echo -e "\033[1;36myay -S \$(grep 'zfs' $FAILED_PKGS_FILE | tr '\n' ' ')\033[0m"
-        echo "Necesitarás tener yay instalado previamente"
+        echo -e "\n\033[1;33mPara instalar ZFS manualmente:\033[0m"
+        echo "1. Instalar dependencias:"
+        echo "   pacman -S --needed git base-devel linux-headers dkms"
+        echo "2. Instalar desde AUR:"
+        echo "   git clone https://aur.archlinux.org/zfs-dkms.git"
+        echo "   cd zfs-dkms"
+        echo "   makepkg -si"
+        echo "3. Repetir para zfs-utils si es necesario"
     fi
 fi
 EOF
@@ -377,7 +432,6 @@ EOF
 cleanup() {
     print_msg "yellow" "[*] Desmontando sistemas de archivos..."
     
-    # Desmontar en orden inverso con manejo de errores
     local mount_points=(
         "${INSTALL_ROOT}/run"
         "${INSTALL_ROOT}/dev/pts" 
@@ -413,14 +467,23 @@ main() {
     clear
     print_msg "green" "================================================"
     print_msg "green" "  INSTALADOR DE ARCH LINUX CON LUKS + ZFS"
-    print_msg "green" "  VERSIÓN FINAL - TODOS LOS ERRORES CORREGIDOS"
+    print_msg "green" "  CONFIGURACIÓN PERSONALIZADA PARA $USERNAME"
     print_msg "green" "================================================"
     
     init_logs
     check_root
+    
+    install_zfs_dependencies || {
+        print_msg "red" "[ERROR] No se pudo instalar dependencias ZFS"
+        exit 1
+    }
+    
+    configure_zfs_hooks || {
+        print_msg "yellow" "[ADVERTENCIA] Hubo problemas con la configuración ZFS"
+    }
+    
     detect_env
     
-    # Flujo de instalación con manejo de errores
     if create_mount_structure && setup_disks && mount_filesystems; then
         if install_packages; then
             configure_system
@@ -428,7 +491,7 @@ main() {
             print_msg "red" "[ERROR] Hubo problemas con la instalación de paquetes"
         fi
     else
-        print_msg "red" "[ERROR] Falló la configuración inicial, no se puede continuar"
+        print_msg "red" "[ERROR] Falló la configuración inicial"
     fi
     
     cleanup
