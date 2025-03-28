@@ -13,6 +13,13 @@
 # - Manejo de errores mejorado
 # ==================================================
 
+#!/bin/bash
+
+# ==================================================
+# INSTALADOR DE ARCH LINUX CON LUKS/ZFS
+# VERSIÓN FINAL - ERRORES DE MONTAJE CORREGIDOS
+# ==================================================
+
 # --- Configuración inicial ---
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -29,7 +36,7 @@ TIMEZONE="Europe/Madrid"
 LANG="en_US.UTF-8"
 KEYMAP="es"
 HOSTNAME="archzfs"
-INSTALL_ROOT="/mnt"
+INSTALL_ROOT="/mnt"  # Ruta corregida a /mnt
 LOG_FILE="/var/log/installation.log"
 FAILED_PKGS_FILE="/var/log/failed_packages.log"
 
@@ -172,7 +179,16 @@ mount_filesystems() {
         return 1
     }
     
-    # Montar EFI
+    # Verificar y crear directorio EFI si no existe
+    if [ ! -d "${INSTALL_ROOT}/boot/efi" ]; then
+        print_msg "yellow" "[ADVERTENCIA] Directorio /boot/efi no existe, creándolo..."
+        mkdir -p "${INSTALL_ROOT}/boot/efi" || {
+            print_msg "red" "[ERROR] No se pudo crear ${INSTALL_ROOT}/boot/efi"
+            return 1
+        }
+    fi
+    
+    # Montar partición EFI
     mount "/dev/${DISK_SYSTEM}1" "${INSTALL_ROOT}/boot/efi" || {
         print_msg "red" "[ERROR] Falló el montaje de EFI"
         return 1
@@ -350,7 +366,7 @@ main() {
     clear
     print_msg "green" "================================================"
     print_msg "green" "  INSTALADOR DE ARCH LINUX CON LUKS + ZFS"
-    print_msg "green" "  VERSIÓN FINAL - TODOS LOS ERRORES CORREGIDOS"
+    print_msg "green" "  VERSIÓN FINAL - ERRORES CORREGIDOS"
     print_msg "green" "================================================"
     
     init_logs
