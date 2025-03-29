@@ -13,17 +13,6 @@
 # - Manejo de errores mejorado
 # ==================================================
 
-#!/bin/bash
-
-# ==================================================
-# INSTALADOR AUTOMÁTICO DE ARCH LINUX CON ZFS/LUKS
-# ==================================================
-# Versión mejorada con:
-# - Configuración optimizada de pacman.conf
-# - Mejor manejo de errores en chroot
-# - Soporte para multilib
-# ==================================================
-
 # --- Configuración inicial ---
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -68,14 +57,12 @@ check_root() {
 configure_pacman() {
     print_msg "blue" "[*] Configurando pacman.conf..."
     
-    # Configuración optimizada de pacman.conf
     sed -i -e '/^#Color$/s/^#//' \
            -e '/^#ParallelDownloads = 5/s/^#//' \
            -e '/^ParallelDownloads/a ILoveCandy' \
            -e '/^\[multilib\]/,/Include/ s/^#//' \
            -e '/^\[multilib-testing\]/,/Include/ s/^Include/#Include/' /etc/pacman.conf
     
-    # Sincronizar bases de datos
     if ! pacman -Sy; then
         print_msg "red" "[ERROR] Falló al sincronizar bases de datos"
         return 1
@@ -88,7 +75,6 @@ configure_pacman() {
 install_zfs_dependencies() {
     print_msg "blue" "[*] Instalando dependencias para ZFS..."
     
-    # Dependencias esenciales
     local essential_deps=(
         git base-devel linux-headers dkms
     )
@@ -98,7 +84,6 @@ install_zfs_dependencies() {
         return 1
     fi
     
-    # Intentar instalar ZFS desde repositorios oficiales
     if pacman -Si zfs-dkms &>/dev/null; then
         if pacman -S --noconfirm zfs-dkms zfs-utils; then
             print_msg "green" "[✓] ZFS instalado desde repositorios oficiales"
@@ -106,7 +91,6 @@ install_zfs_dependencies() {
         fi
     fi
     
-    # Si falla, intentar desde AUR
     print_msg "yellow" "[!] Intentando instalar ZFS desde AUR..."
     
     local aur_user="aur_builder"
@@ -117,7 +101,6 @@ install_zfs_dependencies() {
         fi
     fi
     
-    # Instalar yay
     sudo -u "$aur_user" bash <<'AUR_INSTALL'
         cd /tmp || exit 1
         rm -rf yay 2>/dev/null
@@ -131,7 +114,6 @@ AUR_INSTALL
         return 1
     fi
     
-    # Instalar ZFS desde AUR
     if sudo -u "$aur_user" yay -S --noconfirm zfs-dkms zfs-utils; then
         print_msg "green" "[✓] ZFS instalado desde AUR"
         return 0
@@ -142,6 +124,11 @@ AUR_INSTALL
 }
 
 configure_zfs_hooks() {
+    if ! pacman -Q zfs-dkms &>/dev/null; then
+        print_msg "yellow" "[ADVERTENCIA] ZFS no está instalado, omitiendo configuración de hooks"
+        return 1
+    fi
+
     print_msg "blue" "[*] Configurando hooks ZFS..."
     
     if ! ls /usr/lib/modules/*/extra/zfs &>/dev/null; then
@@ -177,17 +164,16 @@ create_mount_structure() {
         "dev" 
         "dev/pts" 
         "run"
+        "tmp"
         "etc/profile.d"
     )
     
     for dir in "${mount_dirs[@]}"; do
-        if [ ! -d "${INSTALL_ROOT}/${dir}" ]; then
-            mkdir -p "${INSTALL_ROOT}/${dir}" || {
-                print_msg "red" "[ERROR] No se pudo crear ${INSTALL_ROOT}/${dir}"
-                return 1
-            }
-            print_msg "green" "[✓] Directorio ${INSTALL_ROOT}/${dir} creado"
-        fi
+        mkdir -p "${INSTALL_ROOT}/${dir}" || {
+            print_msg "red" "[ERROR] No se pudo crear ${INSTALL_ROOT}/${dir}"
+            return 1
+        }
+        print_msg "green" "[✓] Directorio ${INSTALL_ROOT}/${dir} creado"
     done
     
     return 0
@@ -270,12 +256,10 @@ mount_filesystems() {
         return 1
     fi
     
-    if [ ! -d "${INSTALL_ROOT}/boot/efi" ]; then
-        mkdir -p "${INSTALL_ROOT}/boot/efi" || {
-            print_msg "red" "[ERROR] No se pudo crear ${INSTALL_ROOT}/boot/efi"
-            return 1
-        }
-    fi
+    mkdir -p "${INSTALL_ROOT}/boot/efi" || {
+        print_msg "red" "[ERROR] No se pudo crear ${INSTALL_ROOT}/boot/efi"
+        return 1
+    }
     
     if ! mount "/dev/${DISK_SYSTEM}1" "${INSTALL_ROOT}/boot/efi"; then
         print_msg "red" "[ERROR] Falló el montaje de EFI"
@@ -287,25 +271,27 @@ mount_filesystems() {
         return 1
     fi
     
+    # Montar sistemas de archivos virtuales con las opciones correctas
     local virtual_mounts=(
-        "proc:proc"
-        "sys:sysfs"
-        "dev:dev"
-        "dev/pts:devpts"
-        "run:tmpfs"
+        "proc:proc:proc,nosuid,nodev,noexec"
+        "sys:sysfs:sysfs,nosuid,nodev,noexec,ro"
+        "dev:devtmpfs:devtmpfs,mode=0755,nosuid"
+        "dev/pts:devpts:devpts,nosuid,noexec,mode=0620,gid=5"
+        "run:tmpfs:tmpfs,nosuid,nodev,mode=0755"
+        "tmp:tmpfs:tmpfs,nosuid,nodev"
     )
     
     for mount_point in "${virtual_mounts[@]}"; do
-        IFS=':' read -r target type <<< "$mount_point"
-        if [ ! -d "${INSTALL_ROOT}/${target}" ]; then
-            mkdir -p "${INSTALL_ROOT}/${target}" || {
-                print_msg "yellow" "[ADVERTENCIA] No se pudo crear ${INSTALL_ROOT}/${target}"
-                continue
-            }
-        fi
+        IFS=':' read -r target type options <<< "$mount_point"
+        mkdir -p "${INSTALL_ROOT}/${target}" || {
+            print_msg "yellow" "[ADVERTENCIA] No se pudo crear ${INSTALL_ROOT}/${target}"
+            continue
+        }
         
-        if ! mount -t "$type" "$type" "${INSTALL_ROOT}/${target}"; then
-            print_msg "yellow" "[ADVERTENCIA] Falló montaje de ${target}"
+        if ! mount -t "$type" -o "$options" "$type" "${INSTALL_ROOT}/${target}"; then
+            print_msg "yellow" "[ADVERTENCIA] Falló montaje de ${target} (tipo: ${type}, opciones: ${options})"
+        else
+            print_msg "green" "[✓] ${target} montado correctamente"
         fi
     done
     
@@ -325,7 +311,7 @@ install_packages() {
     print_msg "blue" "[*] Instalando ${#pkg_list[@]} paquetes..."
     
     # Configurar pacman en el sistema instalado
-    arch-chroot "$INSTALL_ROOT" bash <<'CHROOT_PACMAN'
+    if ! arch-chroot "$INSTALL_ROOT" bash <<'CHROOT_PACMAN'
         sed -i -e '/^#Color$/s/^#//' \
                -e '/^#ParallelDownloads = 5/s/^#//' \
                -e '/^ParallelDownloads/a ILoveCandy' \
@@ -334,8 +320,7 @@ install_packages() {
         
         pacman -Sy || exit 1
 CHROOT_PACMAN
-
-    if [ $? -ne 0 ]; then
+    then
         print_msg "red" "[ERROR] Falló al configurar pacman en el chroot"
         return 1
     fi
@@ -389,7 +374,6 @@ configure_system() {
         return 1
     fi
     
-    # Configuración ZFS solo si hay discos definidos y no está en la lista de fallos
     if [ ${#DISK_ZFS[@]} -gt 0 ] && ! grep -q "zfs" "$FAILED_PKGS_FILE"; then
         arch-chroot "$INSTALL_ROOT" bash <<'ZFS_CONFIG'
             if modprobe zfs; then
@@ -402,9 +386,7 @@ configure_system() {
 ZFS_CONFIG
     fi
     
-    # Configuración del sistema en chroot con mejor manejo de errores
     if ! arch-chroot "$INSTALL_ROOT" bash <<'CHROOT_CONFIG'
-        # Configuración básica del sistema
         ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime || exit 1
         hwclock --systohc || exit 1
         echo "LANG=$LANG" > /etc/locale.conf || exit 1
@@ -413,7 +395,6 @@ ZFS_CONFIG
         sed -i '/en_US.UTF-8/s/^#//g' /etc/locale.gen || exit 1
         locale-gen || exit 1
 
-        # Configurar hooks basado en si ZFS está instalado
         if pacman -Q zfs-dkms &>/dev/null; then
             sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect modconf block encrypt lvm2 filesystems fsck zfs)/' /etc/mkinitcpio.conf
         else
@@ -422,12 +403,10 @@ ZFS_CONFIG
         
         mkinitcpio -P || exit 1
 
-        # Instalar y configurar GRUB
         grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB || exit 1
         echo "GRUB_CMDLINE_LINUX=\"cryptdevice=UUID=\$(blkid -s UUID -o value /dev/${DISK_SYSTEM}2):crypt-root root=/dev/mapper/vg_arch-root\"" >> /etc/default/grub || exit 1
         grub-mkconfig -o /boot/grub/grub.cfg || exit 1
 
-        # Configurar usuarios y contraseñas
         echo "root:$ROOT_PASSWORD" | chpasswd || exit 1
         useradd -m -G wheel "$USERNAME" || exit 1
         echo "$USERNAME:$USER_PASSWORD" | chpasswd || exit 1
@@ -438,7 +417,6 @@ CHROOT_CONFIG
         return 1
     fi
 
-    # Configurar notificación de paquetes faltantes
     mkdir -p "${INSTALL_ROOT}/etc/profile.d"
     cat <<'FAILED_PKGS_NOTIFY' > "${INSTALL_ROOT}/etc/profile.d/show_failed_pkgs.sh"
 #!/bin/sh
@@ -475,18 +453,20 @@ cleanup() {
     print_msg "yellow" "[*] Desmontando sistemas de archivos..."
     
     local mount_points=(
-        "${INSTALL_ROOT}/run"
-        "${INSTALL_ROOT}/dev/pts" 
-        "${INSTALL_ROOT}/dev"
         "${INSTALL_ROOT}/proc"
         "${INSTALL_ROOT}/sys"
+        "${INSTALL_ROOT}/dev/pts"
+        "${INSTALL_ROOT}/dev"
+        "${INSTALL_ROOT}/run"
+        "${INSTALL_ROOT}/tmp"
         "${INSTALL_ROOT}/boot/efi"
         "$INSTALL_ROOT"
     )
     
     for point in "${mount_points[@]}"; do
         if mountpoint -q "$point"; then
-            umount -R "$point" 2>/dev/null || print_msg "yellow" "[ADVERTENCIA] No se pudo desmontar $point"
+            umount -R "$point" 2>/dev/null && print_msg "green" "[✓] $point desmontado" || 
+            print_msg "yellow" "[ADVERTENCIA] No se pudo desmontar $point"
         fi
     done
     
@@ -514,18 +494,15 @@ main() {
     init_logs
     check_root
     
-    # Configurar pacman primero
     if ! configure_pacman; then
         print_msg "red" "[ERROR] Falló la configuración inicial de pacman"
         exit 1
     fi
     
-    # Instalar dependencias ZFS (continuar si falla)
     if ! install_zfs_dependencies; then
         print_msg "yellow" "[ADVERTENCIA] Continuando sin dependencias ZFS completas"
     fi
     
-    # Configurar hooks ZFS (continuar si falla)
     if ! configure_zfs_hooks; then
         print_msg "yellow" "[ADVERTENCIA] Continuando sin configuración ZFS completa"
     fi
