@@ -13,6 +13,21 @@
 # - Manejo de errores mejorado
 # ==================================================
 
+#!/bin/bash
+
+# ==================================================
+# INSTALADOR AUTOMÁTICO DE ARCH LINUX CON ZFS/LUKS
+# ==================================================
+# Características:
+# - Soporte para cifrado LUKS (solo partición raíz)
+# - Configuración ZFS opcional
+# - Detección automática de entorno (VM/físico)
+# - Continuación ante fallos de paquetes
+# - Notificación post-reinicio de paquetes faltantes
+# - Interfaz colorida y amigable
+# - Manejo de errores mejorado
+# ==================================================
+
 # --- Configuración inicial ---
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -57,64 +72,89 @@ check_root() {
     [ "$(id -u)" -ne 0 ] && print_msg "red" "ERROR: Ejecuta como root. Usa 'sudo -i' en el live USB." && exit 1
 }
 
-# Instalar dependencias para ZFS
+# Instalar dependencias para ZFS (con manejo mejorado de errores)
 install_zfs_dependencies() {
     print_msg "blue" "[*] Instalando dependencias para ZFS..."
     
-    pacman -Sy --needed --noconfirm git base-devel linux-headers dkms || {
-        print_msg "red" "[ERROR] Falló al instalar dependencias para ZFS"
-        return 1
-    }
+    # Lista de dependencias esenciales
+    local essential_deps=(
+        git base-devel linux-headers dkms
+    )
     
-    if ! pacman -Si zfs-dkms &>/dev/null; then
-        print_msg "yellow" "[!] ZFS no está en los repositorios oficiales, instalando desde AUR..."
-        
-        useradd -m -s /bin/bash aur_builder || {
-            print_msg "red" "[ERROR] No se pudo crear usuario para AUR"
-            return 1
-        }
-        
-        sudo -u aur_builder bash -c '
-            cd /tmp
-            git clone https://aur.archlinux.org/yay.git
-            cd yay
-            makepkg -si --noconfirm
-        ' || {
-            print_msg "red" "[ERROR] Falló al instalar yay"
-            return 1
-        }
-        
-        sudo -u aur_builder yay -S --noconfirm zfs-dkms zfs-utils || {
-            print_msg "red" "[ERROR] Falló al instalar ZFS desde AUR"
-            return 1
-        }
-    else
-        pacman -S --noconfirm zfs-dkms zfs-utils || {
-            print_msg "red" "[ERROR] Falló al instalar ZFS desde repositorios"
-            return 1
-        }
+    # Lista de paquetes ZFS
+    local zfs_packages=(
+        zfs-dkms zfs-utils
+    )
+    
+    # Instalar dependencias esenciales (continuar si falla)
+    if ! pacman -Sy --needed --noconfirm "${essential_deps[@]}"; then
+        print_msg "yellow" "[ADVERTENCIA] Falló al instalar algunas dependencias para ZFS, continuando..."
     fi
     
+    # Verificar espacio en disco antes de instalar ZFS
+    local available_space=$(df --output=avail / | tail -n1)
+    if [ "$available_space" -lt 500000 ]; then
+        print_msg "yellow" "[!] Espacio en disco bajo ($((available_space/1024)) MB), ZFS podría fallar"
+    fi
+    
+    # Intentar instalar ZFS desde repositorios oficiales primero
+    if pacman -Si zfs-dkms &>/dev/null; then
+        if ! pacman -S --noconfirm "${zfs_packages[@]}"; then
+            print_msg "yellow" "[ADVERTENCIA] Falló al instalar ZFS desde repositorios oficiales"
+        else
+            print_msg "green" "[✓] ZFS instalado desde repositorios oficiales"
+            return 0
+        fi
+    fi
+    
+    # Si falla, intentar desde AUR
+    print_msg "yellow" "[!] ZFS no está en repositorios oficiales o falló la instalación, intentando desde AUR..."
+    
+    if ! command -v yay &>/dev/null; then
+        if ! useradd -m -s /bin/bash aur_builder 2>/dev/null; then
+            print_msg "yellow" "[ADVERTENCIA] No se pudo crear usuario para AUR, saltando instalación ZFS"
+            return 1
+        fi
+        
+        if ! sudo -u aur_builder bash -c '
+            cd /tmp
+            git clone https://aur.archlinux.org/yay.git || exit 1
+            cd yay
+            makepkg -si --noconfirm || exit 1
+        '; then
+            print_msg "yellow" "[ADVERTENCIA] Falló al instalar yay, saltando instalación ZFS"
+            return 1
+        fi
+    fi
+    
+    # Instalar ZFS desde AUR (continuar si falla)
+    if ! sudo -u aur_builder yay -S --noconfirm "${zfs_packages[@]}"; then
+        print_msg "yellow" "[ADVERTENCIA] Falló al instalar ZFS desde AUR"
+        return 1
+    fi
+    
+    print_msg "green" "[✓] ZFS instalado desde AUR"
     return 0
 }
 
-# Configurar hooks ZFS en mkinitcpio
+# Configurar hooks ZFS en mkinitcpio (continuar si falla)
 configure_zfs_hooks() {
     print_msg "blue" "[*] Configurando hooks ZFS..."
     
     if ! ls /usr/lib/modules/*/extra/zfs &>/dev/null; then
-        print_msg "red" "[ERROR] Módulos ZFS no encontrados"
+        print_msg "yellow" "[ADVERTENCIA] Módulos ZFS no encontrados, hooks ZFS no se configurarán"
         return 1
     fi
     
-    sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect modconf block encrypt lvm2 filesystems fsck zfs)/' /etc/mkinitcpio.conf || {
-        print_msg "red" "[ERROR] Falló al configurar hooks en mkinitcpio.conf"
+    if ! sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect modconf block encrypt lvm2 filesystems fsck zfs)/' /etc/mkinitcpio.conf; then
+        print_msg "yellow" "[ADVERTENCIA] Falló al configurar hooks en mkinitcpio.conf"
         return 1
-    }
+    fi
     
-    mkinitcpio -P || {
+    if ! mkinitcpio -P; then
         print_msg "yellow" "[ADVERTENCIA] Hubo advertencias al generar initramfs"
-    }
+        return 1
+    fi
     
     return 0
 }
@@ -272,7 +312,7 @@ mount_filesystems() {
     return 0
 }
 
-# Instalación de paquetes
+# Instalación de paquetes con manejo mejorado de errores
 install_packages() {
     local pkg_list=(
         "base" "linux" "linux-firmware" 
@@ -286,8 +326,7 @@ install_packages() {
     print_msg "blue" "[*] Instalando ${#pkg_list[@]} paquetes..."
     
     if ! pacman -Sy; then
-        print_msg "red" "[ERROR] Falló al sincronizar bases de datos"
-        return 1
+        print_msg "yellow" "[ADVERTENCIA] Falló al sincronizar bases de datos, continuando..."
     fi
 
     print_msg "blue" "[*] Instalando paquetes base esenciales..."
@@ -304,20 +343,23 @@ install_packages() {
         if arch-chroot "$INSTALL_ROOT" pacman -S "$pkg" --noconfirm --needed 2>/dev/null; then
             print_msg "green" "[✓] $pkg instalado"
         else
-            print_msg "red" "[✗] Error en $pkg"
+            print_msg "yellow" "[!] Error en $pkg, continuando..."
             echo "$pkg" >> "$FAILED_PKGS_FILE"
             failed_pkgs+=("$pkg")
             
+            # Intentar alternativas solo para paquetes ZFS
             if [[ "$pkg" == "zfs-dkms" || "$pkg" == "zfs-utils" ]]; then
                 print_msg "yellow" "[!] Intentando instalar $pkg desde AUR..."
-                arch-chroot "$INSTALL_ROOT" bash -c "pacman -S --needed git base-devel && \
+                if arch-chroot "$INSTALL_ROOT" bash -c "pacman -S --needed git base-devel && \
                 mkdir -p /tmp/aur && cd /tmp/aur && \
                 git clone https://aur.archlinux.org/${pkg}.git && \
-                cd ${pkg} && makepkg -si --noconfirm" && {
+                cd ${pkg} && makepkg -si --noconfirm"; then
                     print_msg "green" "[✓] $pkg instalado desde AUR"
                     sed -i "/^${pkg}$/d" "$FAILED_PKGS_FILE"
                     failed_pkgs=("${failed_pkgs[@]/$pkg}")
-                } || print_msg "red" "[✗] Falló instalación desde AUR para $pkg"
+                else
+                    print_msg "yellow" "[!] Falló instalación desde AUR para $pkg"
+                fi
             fi
         fi
     done
@@ -340,32 +382,17 @@ configure_system() {
         return 1
     fi
     
-    if [ ${#DISK_ZFS[@]} -gt 0 ]; then
+    # Configuración ZFS solo si hay discos definidos y no está en la lista de fallos
+    if [ ${#DISK_ZFS[@]} -gt 0 ] && ! grep -q "zfs" "$FAILED_PKGS_FILE"; then
         arch-chroot "$INSTALL_ROOT" bash <<EOF
-        modprobe zfs || {
-            echo "Failed to load ZFS module"
-            exit 1
-        }
-        
-        zpool create -f "$ZPOOL_NAME" ${DISK_ZFS[@]/#/\/dev\/} || {
-            echo "Failed to create ZFS pool"
-            exit 1
-        }
-        
-        zfs create "$ZPOOL_NAME/data" || {
-            echo "Failed to create ZFS filesystem"
-            exit 1
-        }
-        
-        echo "$ZPOOL_NAME /$ZPOOL_NAME zfs defaults 0 0" >> /etc/fstab || {
-            echo "Failed to configure ZFS in fstab"
-            exit 1
-        }
-EOF
-        if [ $? -ne 0 ]; then
-            print_msg "red" "[ERROR] Falló la configuración de ZFS"
-            return 1
+        if modprobe zfs; then
+            zpool create -f "$ZPOOL_NAME" ${DISK_ZFS[@]/#/\/dev\/} || echo "[ADVERTENCIA] Falló al crear pool ZFS"
+            zfs create "$ZPOOL_NAME/data" || echo "[ADVERTENCIA] Falló al crear filesystem ZFS"
+            echo "$ZPOOL_NAME /$ZPOOL_NAME zfs defaults 0 0" >> /etc/fstab || echo "[ADVERTENCIA] Falló al configurar fstab para ZFS"
+        else
+            echo "[ADVERTENCIA] No se pudo cargar módulo ZFS"
         fi
+EOF
     fi
     
     arch-chroot "$INSTALL_ROOT" bash <<EOF
@@ -377,7 +404,13 @@ EOF
     sed -i '/en_US.UTF-8/s/^#//g' /etc/locale.gen || exit 1
     locale-gen || exit 1
 
-    sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect modconf block encrypt lvm2 filesystems fsck zfs)/' /etc/mkinitcpio.conf || exit 1
+    # Configurar hooks basado en si ZFS está instalado
+    if pacman -Q zfs-dkms &>/dev/null; then
+        sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect modconf block encrypt lvm2 filesystems fsck zfs)/' /etc/mkinitcpio.conf
+    else
+        sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect modconf block encrypt lvm2 filesystems fsck)/' /etc/mkinitcpio.conf
+    fi
+    
     mkinitcpio -P || exit 1
 
     grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB || exit 1
@@ -416,6 +449,9 @@ if [ -s "$FAILED_PKGS_FILE" ]; then
         echo "   cd zfs-dkms"
         echo "   makepkg -si"
         echo "3. Repetir para zfs-utils si es necesario"
+        echo "4. Configurar hooks:"
+        echo "   sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect modconf block encrypt lvm2 filesystems fsck zfs)/' /etc/mkinitcpio.conf"
+        echo "   mkinitcpio -P"
     fi
 fi
 EOF
@@ -473,16 +509,15 @@ main() {
     init_logs
     check_root
     
-    install_zfs_dependencies || {
-        print_msg "red" "[ERROR] No se pudo instalar dependencias ZFS"
-        exit 1
-    }
+    # Instalar dependencias ZFS (continuar si falla)
+    if ! install_zfs_dependencies; then
+        print_msg "yellow" "[ADVERTENCIA] Continuando sin dependencias ZFS completas"
+    fi
     
-    configure_zfs_hooks || {
-        print_msg "yellow" "[ADVERTENCIA] Hubo problemas con la configuración ZFS"
-    }
-    
-    detect_env
+    # Configurar hooks ZFS (continuar si falla)
+    if ! configure_zfs_hooks; then
+        print_msg "yellow" "[ADVERTENCIA] Continuando sin configuración ZFS completa"
+    fi
     
     if create_mount_structure && setup_disks && mount_filesystems; then
         if install_packages; then
