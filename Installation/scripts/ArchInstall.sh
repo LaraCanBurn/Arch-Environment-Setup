@@ -13,6 +13,17 @@
 # - Manejo de errores mejorado
 # ==================================================
 
+#!/bin/bash
+
+# ==================================================
+# INSTALADOR AUTOMÁTICO DE ARCH LINUX CON ZFS/LUKS
+# ==================================================
+# Versión mejorada con:
+# - Configuración optimizada de pacman.conf
+# - Mejor manejo de errores en chroot
+# - Soporte para multilib
+# ==================================================
+
 # --- Configuración inicial ---
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -54,50 +65,48 @@ check_root() {
     [ "$(id -u)" -ne 0 ] && print_msg "red" "ERROR: Ejecuta como root. Usa 'sudo -i' en el live USB." && exit 1
 }
 
-check_disk_space() {
-    local required=$1
-    local available=$(df --output=avail / | tail -n1)
+configure_pacman() {
+    print_msg "blue" "[*] Configurando pacman.conf..."
     
-    if [ "$available" -lt "$required" ]; then
-        print_msg "yellow" "[!] Espacio en disco bajo ($((available/1024)) MB), se necesitan $((required/1024)) MB"
+    # Configuración optimizada de pacman.conf
+    sed -i -e '/^#Color$/s/^#//' \
+           -e '/^#ParallelDownloads = 5/s/^#//' \
+           -e '/^ParallelDownloads/a ILoveCandy' \
+           -e '/^\[multilib\]/,/Include/ s/^#//' \
+           -e '/^\[multilib-testing\]/,/Include/ s/^Include/#Include/' /etc/pacman.conf
+    
+    # Sincronizar bases de datos
+    if ! pacman -Sy; then
+        print_msg "red" "[ERROR] Falló al sincronizar bases de datos"
         return 1
     fi
+    
+    print_msg "green" "[✓] Configuración de pacman completada"
     return 0
 }
 
 install_zfs_dependencies() {
     print_msg "blue" "[*] Instalando dependencias para ZFS..."
     
-    # Verificar espacio mínimo (300MB)
-    check_disk_space 300000 || {
-        print_msg "yellow" "[!] Espacio insuficiente para instalar ZFS"
-        return 1
-    }
-
-    # Dependencias esenciales mínimas
+    # Dependencias esenciales
     local essential_deps=(
         git base-devel linux-headers dkms
     )
     
-    # Intentar instalar primero las dependencias esenciales
     if ! pacman -Sy --needed --noconfirm "${essential_deps[@]}"; then
-        print_msg "yellow" "[ADVERTENCIA] Falló al instalar dependencias esenciales para ZFS"
-        
-        # Intentar instalar solo lo absolutamente necesario
-        local minimal_deps=(git base-devel)
-        if ! pacman -Sy --needed --noconfirm "${minimal_deps[@]}"; then
-            print_msg "yellow" "[ADVERTENCIA] No se pudo instalar dependencias mínimas, saltando ZFS"
-            return 1
-        fi
-    fi
-
-    # Verificar si git está disponible ahora
-    if ! command -v git &>/dev/null; then
-        print_msg "yellow" "[ADVERTENCIA] git no está disponible, no se puede instalar desde AUR"
+        print_msg "yellow" "[ADVERTENCIA] Falló al instalar dependencias para ZFS"
         return 1
     fi
-
-    # Instalar ZFS desde AUR como último recurso
+    
+    # Intentar instalar ZFS desde repositorios oficiales
+    if pacman -Si zfs-dkms &>/dev/null; then
+        if pacman -S --noconfirm zfs-dkms zfs-utils; then
+            print_msg "green" "[✓] ZFS instalado desde repositorios oficiales"
+            return 0
+        fi
+    fi
+    
+    # Si falla, intentar desde AUR
     print_msg "yellow" "[!] Intentando instalar ZFS desde AUR..."
     
     local aur_user="aur_builder"
@@ -107,8 +116,8 @@ install_zfs_dependencies() {
             return 1
         fi
     fi
-
-    # Instalar yay como usuario normal
+    
+    # Instalar yay
     sudo -u "$aur_user" bash <<'AUR_INSTALL'
         cd /tmp || exit 1
         rm -rf yay 2>/dev/null
@@ -116,29 +125,23 @@ install_zfs_dependencies() {
         cd yay || exit 1
         makepkg -si --noconfirm || exit 1
 AUR_INSTALL
-
+    
     if [ $? -ne 0 ]; then
         print_msg "yellow" "[ADVERTENCIA] Falló al instalar yay"
         return 1
     fi
-
+    
     # Instalar ZFS desde AUR
-    if ! sudo -u "$aur_user" yay -S --noconfirm zfs-dkms zfs-utils; then
+    if sudo -u "$aur_user" yay -S --noconfirm zfs-dkms zfs-utils; then
+        print_msg "green" "[✓] ZFS instalado desde AUR"
+        return 0
+    else
         print_msg "yellow" "[ADVERTENCIA] Falló al instalar ZFS desde AUR"
         return 1
     fi
-
-    print_msg "green" "[✓] ZFS instalado desde AUR"
-    return 0
 }
 
 configure_zfs_hooks() {
-    # Solo configurar hooks si ZFS está instalado
-    if ! pacman -Q zfs-dkms &>/dev/null; then
-        print_msg "yellow" "[ADVERTENCIA] ZFS no está instalado, omitiendo configuración de hooks"
-        return 1
-    fi
-
     print_msg "blue" "[*] Configurando hooks ZFS..."
     
     if ! ls /usr/lib/modules/*/extra/zfs &>/dev/null; then
@@ -314,20 +317,27 @@ install_packages() {
         "base" "linux" "linux-firmware" 
         "grub" "efibootmgr" "networkmanager" 
         "lvm2" "cryptsetup" 
+        "zfs-dkms" "zfs-utils" 
         "vim" "sudo"
     )
-    
-    # Solo agregar ZFS si se instaló correctamente
-    if pacman -Q zfs-dkms &>/dev/null; then
-        pkg_list+=("zfs-dkms" "zfs-utils")
-    fi
-    
     local failed_pkgs=()
 
     print_msg "blue" "[*] Instalando ${#pkg_list[@]} paquetes..."
     
-    if ! pacman -Sy; then
-        print_msg "yellow" "[ADVERTENCIA] Falló al sincronizar bases de datos, continuando..."
+    # Configurar pacman en el sistema instalado
+    arch-chroot "$INSTALL_ROOT" bash <<'CHROOT_PACMAN'
+        sed -i -e '/^#Color$/s/^#//' \
+               -e '/^#ParallelDownloads = 5/s/^#//' \
+               -e '/^ParallelDownloads/a ILoveCandy' \
+               -e '/^\[multilib\]/,/Include/ s/^#//' \
+               -e '/^\[multilib-testing\]/,/Include/ s/^Include/#Include/' /etc/pacman.conf
+        
+        pacman -Sy || exit 1
+CHROOT_PACMAN
+
+    if [ $? -ne 0 ]; then
+        print_msg "red" "[ERROR] Falló al configurar pacman en el chroot"
+        return 1
     fi
 
     print_msg "blue" "[*] Instalando paquetes base esenciales..."
@@ -347,6 +357,18 @@ install_packages() {
             print_msg "yellow" "[!] Error en $pkg, continuando..."
             echo "$pkg" >> "$FAILED_PKGS_FILE"
             failed_pkgs+=("$pkg")
+            
+            if [[ "$pkg" == "zfs-dkms" || "$pkg" == "zfs-utils" ]]; then
+                print_msg "yellow" "[!] Intentando instalar $pkg desde AUR..."
+                arch-chroot "$INSTALL_ROOT" bash -c "pacman -S --needed git base-devel && \
+                mkdir -p /tmp/aur && cd /tmp/aur && \
+                git clone https://aur.archlinux.org/${pkg}.git && \
+                cd ${pkg} && makepkg -si --noconfirm" && {
+                    print_msg "green" "[✓] $pkg instalado desde AUR"
+                    sed -i "/^${pkg}$/d" "$FAILED_PKGS_FILE"
+                    failed_pkgs=("${failed_pkgs[@]/$pkg}")
+                } || print_msg "yellow" "[!] Falló instalación desde AUR para $pkg"
+            fi
         fi
     done
 
@@ -367,8 +389,8 @@ configure_system() {
         return 1
     fi
     
-    # Configuración ZFS solo si está instalado y hay discos definidos
-    if pacman -Q zfs-dkms &>/dev/null && [ ${#DISK_ZFS[@]} -gt 0 ]; then
+    # Configuración ZFS solo si hay discos definidos y no está en la lista de fallos
+    if [ ${#DISK_ZFS[@]} -gt 0 ] && ! grep -q "zfs" "$FAILED_PKGS_FILE"; then
         arch-chroot "$INSTALL_ROOT" bash <<'ZFS_CONFIG'
             if modprobe zfs; then
                 zpool create -f "$ZPOOL_NAME" ${DISK_ZFS[@]/#/\/dev\/} || echo "[ADVERTENCIA] Falló al crear pool ZFS"
@@ -380,7 +402,9 @@ configure_system() {
 ZFS_CONFIG
     fi
     
-    arch-chroot "$INSTALL_ROOT" bash <<'BASE_CONFIG'
+    # Configuración del sistema en chroot con mejor manejo de errores
+    if ! arch-chroot "$INSTALL_ROOT" bash <<'CHROOT_CONFIG'
+        # Configuración básica del sistema
         ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime || exit 1
         hwclock --systohc || exit 1
         echo "LANG=$LANG" > /etc/locale.conf || exit 1
@@ -398,17 +422,18 @@ ZFS_CONFIG
         
         mkinitcpio -P || exit 1
 
+        # Instalar y configurar GRUB
         grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB || exit 1
         echo "GRUB_CMDLINE_LINUX=\"cryptdevice=UUID=\$(blkid -s UUID -o value /dev/${DISK_SYSTEM}2):crypt-root root=/dev/mapper/vg_arch-root\"" >> /etc/default/grub || exit 1
         grub-mkconfig -o /boot/grub/grub.cfg || exit 1
 
+        # Configurar usuarios y contraseñas
         echo "root:$ROOT_PASSWORD" | chpasswd || exit 1
         useradd -m -G wheel "$USERNAME" || exit 1
         echo "$USERNAME:$USER_PASSWORD" | chpasswd || exit 1
         echo "%wheel ALL=(ALL) ALL" >> /etc/sudoers || exit 1
-BASE_CONFIG
-
-    if [ $? -ne 0 ]; then
+CHROOT_CONFIG
+    then
         print_msg "red" "[ERROR] Falló la configuración en chroot"
         return 1
     fi
@@ -438,7 +463,11 @@ if [ -s "/var/log/failed_packages.log" ]; then
 fi
 FAILED_PKGS_NOTIFY
 
-    chmod +x "${INSTALL_ROOT}/etc/profile.d/show_failed_pkgs.sh"
+    chmod +x "${INSTALL_ROOT}/etc/profile.d/show_failed_pkgs.sh" || {
+        print_msg "red" "[ERROR] No se pudo hacer ejecutable show_failed_pkgs.sh"
+        return 1
+    }
+    
     return 0
 }
 
@@ -485,6 +514,12 @@ main() {
     init_logs
     check_root
     
+    # Configurar pacman primero
+    if ! configure_pacman; then
+        print_msg "red" "[ERROR] Falló la configuración inicial de pacman"
+        exit 1
+    fi
+    
     # Instalar dependencias ZFS (continuar si falla)
     if ! install_zfs_dependencies; then
         print_msg "yellow" "[ADVERTENCIA] Continuando sin dependencias ZFS completas"
@@ -497,7 +532,9 @@ main() {
     
     if create_mount_structure && setup_disks && mount_filesystems; then
         if install_packages; then
-            configure_system
+            if ! configure_system; then
+                print_msg "red" "[ERROR] Hubo problemas con la configuración del sistema"
+            fi
         else
             print_msg "red" "[ERROR] Hubo problemas con la instalación de paquetes"
         fi
