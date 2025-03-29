@@ -13,8 +13,6 @@
 # - Manejo de errores mejorado
 # ==================================================
 
-#!/bin/bash
-
 # --- Configuración inicial ---
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -124,113 +122,6 @@ configure_pacman() {
     return 0
 }
 
-install_zfs_dependencies() {
-    print_msg "blue" "[*] Instalando dependencias para ZFS..."
-    
-    local essential_deps=(
-        git base-devel linux-headers dkms
-    )
-    
-    if ! pacman -Sy --needed --noconfirm "${essential_deps[@]}"; then
-        print_msg "yellow" "[ADVERTENCIA] Falló al instalar dependencias para ZFS"
-        return 1
-    fi
-    
-    if pacman -Si zfs-dkms &>/dev/null; then
-        if pacman -S --noconfirm zfs-dkms zfs-utils; then
-            print_msg "green" "[✓] ZFS instalado desde repositorios oficiales"
-            return 0
-        fi
-    fi
-    
-    print_msg "yellow" "[!] Intentando instalar ZFS desde AUR..."
-    
-    local aur_user="aur_builder"
-    if ! id "$aur_user" &>/dev/null; then
-        if ! useradd -m -s /bin/bash "$aur_user"; then
-            print_msg "yellow" "[ADVERTENCIA] No se pudo crear usuario para AUR"
-            return 1
-        fi
-    fi
-    
-    sudo -u "$aur_user" bash <<'AUR_INSTALL'
-        cd /tmp || exit 1
-        rm -rf yay 2>/dev/null
-        git clone https://aur.archlinux.org/yay.git || exit 1
-        cd yay || exit 1
-        makepkg -si --noconfirm || exit 1
-AUR_INSTALL
-    
-    if [ $? -ne 0 ]; then
-        print_msg "yellow" "[ADVERTENCIA] Falló al instalar yay"
-        return 1
-    fi
-    
-    if sudo -u "$aur_user" yay -S --noconfirm zfs-dkms zfs-utils; then
-        print_msg "green" "[✓] ZFS instalado desde AUR"
-        return 0
-    else
-        print_msg "yellow" "[ADVERTENCIA] Falló al instalar ZFS desde AUR"
-        return 1
-    fi
-}
-
-configure_zfs_hooks() {
-    if ! pacman -Q zfs-dkms &>/dev/null; then
-        print_msg "yellow" "[ADVERTENCIA] ZFS no está instalado, omitiendo configuración de hooks"
-        return 1
-    fi
-
-    print_msg "blue" "[*] Configurando hooks ZFS..."
-    
-    if ! ls /usr/lib/modules/*/extra/zfs &>/dev/null; then
-        print_msg "yellow" "[ADVERTENCIA] Módulos ZFS no encontrados"
-        return 1
-    fi
-    
-    if ! sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect modconf block encrypt lvm2 filesystems fsck zfs)/' /etc/mkinitcpio.conf; then
-        print_msg "yellow" "[ADVERTENCIA] Falló al configurar hooks"
-        return 1
-    fi
-    
-    if ! mkinitcpio -P; then
-        print_msg "yellow" "[ADVERTENCIA] Hubo advertencias al generar initramfs"
-        return 1
-    fi
-    
-    return 0
-}
-
-create_mount_structure() {
-    print_msg "blue" "[*] Creando estructura de directorios..."
-    
-    mkdir -p "$INSTALL_ROOT" || {
-        print_msg "red" "[ERROR] No se pudo crear $INSTALL_ROOT"
-        return 1
-    }
-    
-    local mount_dirs=(
-        "boot/efi" 
-        "proc" 
-        "sys" 
-        "dev" 
-        "dev/pts" 
-        "run"
-        "tmp"
-        "etc/profile.d"
-    )
-    
-    for dir in "${mount_dirs[@]}"; do
-        mkdir -p "${INSTALL_ROOT}/${dir}" || {
-            print_msg "red" "[ERROR] No se pudo crear ${INSTALL_ROOT}/${dir}"
-            return 1
-        }
-        print_msg "green" "[✓] Directorio ${INSTALL_ROOT}/${dir} creado"
-    done
-    
-    return 0
-}
-
 setup_disks() {
     print_msg "yellow" "[*] Configurando discos..."
     lsblk -d -o NAME,SIZE,MODEL | grep -v "loop"
@@ -254,7 +145,7 @@ setup_disks() {
     parted -s "/dev/$DISK_SYSTEM" set 1 esp on
     parted -s "/dev/$DISK_SYSTEM" mkpart primary ext4 513MiB 100%
 
-    print_msg "yellow" "[*] Configurando cifrado LUKS..."
+    print_msg "yellow" "[*] Configurando cifrado LUKS en partición raíz..."
     until cryptsetup luksFormat --type luks2 \
         --cipher aes-xts-plain64 \
         --key-size 512 \
@@ -266,9 +157,9 @@ setup_disks() {
         sleep 2
     done
     
-    # Verificar configuración LUKS
     verify_luks "/dev/${DISK_SYSTEM}2" || return 1
     
+    print_msg "yellow" "[*] Abriendo partición cifrada..."
     cryptsetup open "/dev/${DISK_SYSTEM}2" crypt-root || {
         print_msg "red" "[ERROR] No se pudo abrir el dispositivo cifrado"
         return 1
@@ -314,7 +205,6 @@ setup_zfs() {
 
     print_msg "blue" "[*] Configurando ZFS en discos: ${DISK_ZFS[*]}..."
     
-    # Configurar cifrado para discos ZFS
     for disk in "${DISK_ZFS[@]}"; do
         print_msg "blue" "[*] Configurando cifrado LUKS en $disk..."
         cryptsetup luksFormat --type luks2 \
@@ -328,23 +218,19 @@ setup_zfs() {
             return 1
         }
         
-        # Verificar configuración LUKS
         verify_luks "/dev/$disk" || return 1
         
-        # Abrir dispositivo cifrado
         cryptsetup open "/dev/$disk" "zfs_${disk}" || {
             print_msg "red" "[ERROR] Falló al abrir dispositivo cifrado $disk"
             return 1
         }
     done
 
-    # Cargar módulo ZFS
     modprobe zfs || {
         print_msg "red" "[ERROR] Falló al cargar módulo ZFS"
         return 1
     }
 
-    # Crear pool ZFS
     zpool create -f -o ashift=12 \
         -O compression=lz4 \
         -O acltype=posixacl \
@@ -360,13 +246,11 @@ setup_zfs() {
         return 1
     }
 
-    # Crear sistemas de archivos ZFS
     zfs create -o mountpoint=none "$ZPOOL_NAME/ROOT" || return 1
     zfs create -o mountpoint=/ -o canmount=noauto "$ZPOOL_NAME/ROOT/default" || return 1
     zfs create -o mountpoint=/home "$ZPOOL_NAME/home" || return 1
     zfs create -o mountpoint=/var "$ZPOOL_NAME/var" || return 1
 
-    # Configurar propiedades
     zfs set devices=off "$ZPOOL_NAME"
     zpool set bootfs="$ZPOOL_NAME/ROOT/default" "$ZPOOL_NAME"
 
@@ -374,12 +258,40 @@ setup_zfs() {
     return 0
 }
 
+create_mount_structure() {
+    print_msg "blue" "[*] Creando estructura de directorios..."
+    
+    mkdir -p "$INSTALL_ROOT" || {
+        print_msg "red" "[ERROR] No se pudo crear $INSTALL_ROOT"
+        return 1
+    }
+    
+    local mount_dirs=(
+        "boot/efi" 
+        "proc" 
+        "sys" 
+        "dev" 
+        "dev/pts" 
+        "run"
+        "tmp"
+        "etc/profile.d"
+    )
+    
+    for dir in "${mount_dirs[@]}"; do
+        mkdir -p "${INSTALL_ROOT}/${dir}" || {
+            print_msg "red" "[ERROR] No se pudo crear ${INSTALL_ROOT}/${dir}"
+            return 1
+        }
+        print_msg "green" "[✓] Directorio ${INSTALL_ROOT}/${dir} creado"
+    done
+    
+    return 0
+}
+
 mount_filesystems() {
     print_msg "yellow" "[*] Montando sistemas de archivos..."
     
-    # Montar partición raíz
     if [ ${#DISK_ZFS[@]} -gt 0 ]; then
-        # Para ZFS
         zpool import -a -N -R "$INSTALL_ROOT" "$ZPOOL_NAME" || {
             print_msg "red" "[ERROR] Falló al importar pool ZFS"
             return 1
@@ -392,7 +304,6 @@ mount_filesystems() {
             print_msg "yellow" "[ADVERTENCIA] Falló al montar todos los sistemas de archivos ZFS"
         }
     else
-        # Para LVM estándar
         mount "/dev/mapper/vg_arch-root" "$INSTALL_ROOT" || {
             print_msg "red" "[ERROR] Falló el montaje de la raíz en $INSTALL_ROOT"
             return 1
@@ -414,7 +325,6 @@ mount_filesystems() {
         return 1
     fi
     
-    # Montar sistemas de archivos virtuales con las opciones correctas
     local virtual_mounts=(
         "proc:proc:proc,nosuid,nodev,noexec"
         "sys:sysfs:sysfs,nosuid,nodev,noexec,ro"
@@ -442,12 +352,15 @@ mount_filesystems() {
 }
 
 install_packages() {
-    local failed_pkgs=()
-
     print_msg "blue" "[*] Instalando paquetes base..."
     
+    if ! pacstrap "$INSTALL_ROOT" "${BASE_PACKAGES[@]}" --noconfirm --needed; then
+        print_msg "red" "[ERROR] Falló la instalación de paquetes base"
+        return 1
+    fi
+
     # Configurar pacman en el sistema instalado
-    if ! arch-chroot "$INSTALL_ROOT" bash <<'CHROOT_PACMAN'
+    arch-chroot "$INSTALL_ROOT" bash <<'CHROOT_PACMAN'
         sed -i -e '/^#Color$/s/^#//' \
                -e '/^#ParallelDownloads = 5/s/^#//' \
                -e '/^ParallelDownloads/a ILoveCandy' \
@@ -456,18 +369,7 @@ install_packages() {
         
         pacman -Sy || exit 1
 CHROOT_PACMAN
-    then
-        print_msg "red" "[ERROR] Falló al configurar pacman en el chroot"
-        return 1
-    fi
 
-    print_msg "blue" "[*] Instalando paquetes base esenciales..."
-    if ! pacstrap "$INSTALL_ROOT" "${BASE_PACKAGES[@]}" --noconfirm --needed; then
-        print_msg "red" "[ERROR] Falló la instalación de paquetes base"
-        return 1
-    fi
-
-    # Instalar paquetes de audio
     print_msg "blue" "[*] Instalando paquetes de audio..."
     arch-chroot "$INSTALL_ROOT" pacman -Sy --needed --noconfirm "${AUDIO_PACKAGES[@]}" || {
         print_msg "yellow" "[ADVERTENCIA] Algunos paquetes de audio no se instalaron correctamente"
@@ -502,12 +404,7 @@ EOL
         chown -R $USERNAME:$USERNAME /home/$USERNAME/.config
 AUDIO_CONFIG
 
-    if [ ${#failed_pkgs[@]} -gt 0 ]; then
-        print_msg "yellow" "Advertencia: ${#failed_pkgs[@]} paquetes fallaron (ver $FAILED_PKGS_FILE)"
-        echo "=== Paquetes con errores ===" >> "$FAILED_PKGS_FILE"
-        printf '%s\n' "${failed_pkgs[@]}" >> "$FAILED_PKGS_FILE"
-    fi
-
+    print_msg "green" "[✓] Paquetes instalados correctamente"
     return 0
 }
 
@@ -519,19 +416,12 @@ configure_system() {
         return 1
     fi
     
-    if [ ${#DISK_ZFS[@]} -gt 0 ] && ! grep -q "zfs" "$FAILED_PKGS_FILE"; then
-        arch-chroot "$INSTALL_ROOT" bash <<'ZFS_CONFIG'
-            if modprobe zfs; then
-                zpool import "$ZPOOL_NAME" || echo "[ADVERTENCIA] Falló al importar pool ZFS"
-                zfs mount "$ZPOOL_NAME/ROOT/default" || echo "[ADVERTENCIA] Falló al montar ZFS root"
-                zfs mount -a || echo "[ADVERTENCIA] Falló al montar todos los sistemas de archivos ZFS"
-            else
-                echo "[ADVERTENCIA] No se pudo cargar módulo ZFS"
-            fi
-ZFS_CONFIG
-    fi
-    
-    if ! arch-chroot "$INSTALL_ROOT" bash <<'CHROOT_CONFIG'
+    # Obtener UUIDs para configuración de arranque
+    local root_uuid=$(blkid -s UUID -o value "/dev/${DISK_SYSTEM}2")
+    local crypt_root_uuid=$(blkid -s UUID -o value "/dev/mapper/vg_arch-root")
+
+    # Configuración básica del sistema
+    arch-chroot "$INSTALL_ROOT" bash <<EOF
         ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime || exit 1
         hwclock --systohc || exit 1
         echo "LANG=$LANG" > /etc/locale.conf || exit 1
@@ -539,29 +429,34 @@ ZFS_CONFIG
         echo "$HOSTNAME" > /etc/hostname || exit 1
         sed -i '/en_US.UTF-8/s/^#//g' /etc/locale.gen || exit 1
         locale-gen || exit 1
+EOF
 
+    # Configuración de mkinitcpio
+    arch-chroot "$INSTALL_ROOT" bash <<EOF
         if pacman -Q zfs-dkms &>/dev/null; then
-            sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect modconf block encrypt lvm2 filesystems fsck zfs)/' /etc/mkinitcpio.conf
+            sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect modconf kms keyboard keymap consolefont block encrypt lvm2 zfs filesystems fsck)/' /etc/mkinitcpio.conf
         else
-            sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect modconf block encrypt lvm2 filesystems fsck)/' /etc/mkinitcpio.conf
+            sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect modconf kms keyboard keymap consolefont block encrypt lvm2 filesystems fsck)/' /etc/mkinitcpio.conf
         fi
         
         mkinitcpio -P || exit 1
+EOF
 
+    # Configuración de GRUB
+    arch-chroot "$INSTALL_ROOT" bash <<EOF
         grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB || exit 1
-        echo "GRUB_CMDLINE_LINUX=\"cryptdevice=UUID=\$(blkid -s UUID -o value /dev/${DISK_SYSTEM}2):crypt-root root=/dev/mapper/vg_arch-root\"" >> /etc/default/grub || exit 1
+        echo "GRUB_CMDLINE_LINUX=\"cryptdevice=UUID=${root_uuid}:crypt-root root=UUID=${crypt_root_uuid}\"" >> /etc/default/grub || exit 1
         grub-mkconfig -o /boot/grub/grub.cfg || exit 1
 
         echo "root:$ROOT_PASSWORD" | chpasswd || exit 1
         useradd -m -G wheel,audio "$USERNAME" || exit 1
         echo "$USERNAME:$USER_PASSWORD" | chpasswd || exit 1
         echo "%wheel ALL=(ALL) ALL" >> /etc/sudoers || exit 1
-CHROOT_CONFIG
-    then
-        print_msg "red" "[ERROR] Falló la configuración en chroot"
-        return 1
-    fi
+        
+        systemctl enable NetworkManager || exit 1
+EOF
 
+    # Configuración para mostrar paquetes faltantes
     mkdir -p "${INSTALL_ROOT}/etc/profile.d"
     cat <<'FAILED_PKGS_NOTIFY' > "${INSTALL_ROOT}/etc/profile.d/show_failed_pkgs.sh"
 #!/bin/sh
@@ -591,6 +486,7 @@ FAILED_PKGS_NOTIFY
         return 1
     }
     
+    print_msg "green" "[✓] Configuración del sistema completada"
     return 0
 }
 
@@ -646,32 +542,19 @@ main() {
     init_logs
     check_root
     
-    if ! configure_pacman; then
-        print_msg "red" "[ERROR] Falló la configuración inicial de pacman"
+    # Flujo principal de instalación
+    if configure_pacman && \
+       setup_disks && \
+       setup_zfs && \
+       create_mount_structure && \
+       mount_filesystems && \
+       install_packages && \
+       configure_system; then
+        cleanup
+    else
+        print_msg "red" "[ERROR] La instalación ha fallado. Verifica $LOG_FILE para más detalles."
         exit 1
     fi
-    
-    if ! install_zfs_dependencies; then
-        print_msg "yellow" "[ADVERTENCIA] Continuando sin dependencias ZFS completas"
-    fi
-    
-    if ! configure_zfs_hooks; then
-        print_msg "yellow" "[ADVERTENCIA] Continuando sin configuración ZFS completa"
-    fi
-    
-    if create_mount_structure && setup_disks && setup_zfs && mount_filesystems; then
-        if install_packages; then
-            if ! configure_system; then
-                print_msg "red" "[ERROR] Hubo problemas con la configuración del sistema"
-            fi
-        else
-            print_msg "red" "[ERROR] Hubo problemas con la instalación de paquetes"
-        fi
-    else
-        print_msg "red" "[ERROR] Falló la configuración inicial"
-    fi
-    
-    cleanup
 }
 
 main "$@"
